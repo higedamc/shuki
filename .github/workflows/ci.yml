@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux deps (serialport/keyring/arboard)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libdbus-1-dev pkg-config
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (relay-tests)
+        run: cargo clippy --all-targets --features relay-tests -- -D warnings
+      - name: Format
+        run: cargo fmt --check
+
+  relay-e2e:
+    runs-on: ubuntu-latest
+    services:
+      relay:
+        image: scsibug/nostr-rs-relay
+        ports:
+          - 7777:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libdbus-1-dev pkg-config
+      - name: Relay integration tests
+        run: SHUKI_TEST_RELAY=ws://127.0.0.1:7777 cargo test --features relay-tests --test relay_sync -- --ignored
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo audit (default features)
+        run: |
+          cargo install cargo-audit --locked
+          # The lockfile union includes tor-only deps (arti pulls ring 0.16 /
+          # rsa); the default build graph is what ships. Known tor-feature
+          # advisories are tracked in audit.toml.
+          cargo audit
+        continue-on-error: true

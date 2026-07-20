@@ -15,6 +15,22 @@ pub const NSD_BAUD_RATE: u32 = 9600;
 /// caller's deadline.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Upper bound on buffered bytes while waiting for a newline. Legitimate NSD
+/// responses are < 200 bytes; a peer streaming data without newlines (broken
+/// or hostile device/PTY) must not grow host memory unboundedly.
+const MAX_LINE_BYTES: usize = 8192;
+
+/// Enforce [`MAX_LINE_BYTES`] on a receive buffer (call after every append).
+fn check_line_cap(buf: &mut Vec<u8>) -> Result<()> {
+    if buf.len() > MAX_LINE_BYTES {
+        buf.clear();
+        return Err(ShukiError::Device(format!(
+            "device sent more than {MAX_LINE_BYTES} bytes without a newline"
+        )));
+    }
+    Ok(())
+}
+
 /// Minimal line-oriented serial transport. One command in flight at a time;
 /// the owner (the NSD worker thread) serializes access.
 pub trait SerialTransport: Send {
@@ -91,7 +107,10 @@ impl SerialTransport for SerialPortTransport {
             let mut chunk = [0u8; 256];
             match self.port.read(&mut chunk) {
                 Ok(0) => {} // treated like a poll timeout; loop until deadline
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    self.buf.extend_from_slice(&chunk[..n]);
+                    check_line_cap(&mut self.buf)?;
+                }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::TimedOut
                         || e.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -173,7 +192,10 @@ impl SerialTransport for PtyFileTransport {
             let mut chunk = [0u8; 256];
             match self.file.read(&mut chunk) {
                 Ok(0) => std::thread::sleep(Duration::from_millis(10)),
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    self.buf.extend_from_slice(&chunk[..n]);
+                    check_line_cap(&mut self.buf)?;
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -390,6 +412,16 @@ mod tests {
     use super::*;
 
     const T: Duration = Duration::from_millis(10);
+
+    #[test]
+    fn line_cap_bounds_hostile_stream() {
+        let mut buf = vec![0u8; MAX_LINE_BYTES];
+        assert!(check_line_cap(&mut buf).is_ok());
+        buf.push(0);
+        let err = check_line_cap(&mut buf).unwrap_err();
+        assert!(matches!(err, ShukiError::Device(_)), "got: {err:?}");
+        assert!(buf.is_empty(), "oversized buffer must be discarded");
+    }
 
     #[test]
     fn mock_scripted_exchange() {

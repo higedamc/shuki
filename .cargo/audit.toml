@@ -1,0 +1,13 @@
+# Accepted-risk advisories, all confined to the OPTIONAL `tor` cargo feature
+# (arti 0.28 dependency chain via nostr-sdk). The default build graph contains
+# ring 0.17.14 only and no `rsa` — verified with:
+#   cargo tree -i ring@0.16.20            → no match (default features)
+#   cargo tree --features tor -i ring@0.16.20 → via x509-signature ← tor-rtcompat
+# Revisit whenever nostr-sdk / arti versions are bumped.
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0009", # ring 0.16 AES panic w/ overflow checks — tor-only path
+    "RUSTSEC-2025-0010", # ring <0.17 unmaintained — same tor-only path
+    "RUSTSEC-2023-0071", # rsa Marvin timing — tor-only; arti uses RSA for dir-auth signature *verification* (public-key ops, no secret-key timing surface here)
+    "RUSTSEC-2024-0384", # instant unmaintained — transitive, tor-only path
+]
