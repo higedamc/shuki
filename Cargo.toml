@@ -31,6 +31,7 @@ async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rpassword = "7"
 hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
