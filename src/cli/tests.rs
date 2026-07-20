@@ -137,6 +137,14 @@ impl SyncApi for MockSyncApi {
     async fn fetch_relay_list(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    async fn set_net_mode(&self, _net: crate::config::NetMode) -> Result<()> {
+        Ok(())
+    }
+
+    async fn net_check(&self) -> Result<Vec<(String, Option<String>)>> {
+        Ok(Vec::new())
+    }
 }
 
 // ------------------------------------------------------------- prompter
@@ -247,6 +255,9 @@ fn needs_vault_matrix() {
         cmd: KeyCmd::Export
     }));
     assert!(!needs_vault(&Command::Relay { cmd: RelayCmd::Ls }));
+    assert!(!needs_vault(&Command::Net { cmd: NetCmd::Show }));
+    assert!(!needs_vault(&Command::Net { cmd: NetCmd::Tor }));
+    assert!(!needs_vault(&Command::Net { cmd: NetCmd::Test }));
     assert!(!needs_vault(&Command::Whoami));
     assert!(needs_vault(&Command::Sync));
     assert!(needs_vault(&Command::Restore { yes: true }));
@@ -274,6 +285,21 @@ fn parses_pass_like_invocations() {
     }
     let cli = Cli::try_parse_from(["shuki", "whoami"]).unwrap();
     assert!(matches!(cli.command, Some(Command::Whoami)));
+    let cli = Cli::try_parse_from(["shuki", "net", "socks5", "127.0.0.1:9150"]).unwrap();
+    match cli.command {
+        Some(Command::Net {
+            cmd: NetCmd::Socks5 { addr },
+        }) => assert_eq!(addr, "127.0.0.1:9150"),
+        _ => panic!("wrong parse"),
+    }
+    let cli = Cli::try_parse_from(["shuki", "net", "show"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Net { cmd: NetCmd::Show })
+    ));
+    // socks5 requires an address; net requires a subcommand.
+    assert!(Cli::try_parse_from(["shuki", "net", "socks5"]).is_err());
+    assert!(Cli::try_parse_from(["shuki", "net"]).is_err());
     let cli = Cli::try_parse_from(["shuki"]).unwrap();
     assert!(cli.command.is_none());
     assert!(Cli::try_parse_from(["shuki", "init", "--nsd", "--import-nsec"]).is_err());
@@ -748,6 +774,133 @@ async fn relay_add_rejects_non_websocket_url() {
     assert!(matches!(res, Err(ShukiError::Config(_))));
     assert!(config.relays.is_empty());
     std::env::remove_var("SHUKI_CONFIG");
+}
+
+// ------------------------------------------------------------------ net
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn net_mode_switches_persist_to_config() {
+    use crate::config::{NetMode, DEFAULT_SOCKS5_ADDR};
+
+    let _g = crate::config::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SHUKI_CONFIG", dir.path().join("config.json"));
+    let mut config = Config::default();
+    let mut p = StubPrompter::default();
+    let net = |cmd: NetCmd| Command::Net { cmd };
+
+    // tor → external daemon socks5 default, with a running-tor hint.
+    let (res, out) = run_standalone_capture(net(NetCmd::Tor), &mut config, &mut p).await;
+    res.unwrap();
+    assert!(out.contains("socks5"), "got: {out}");
+    assert!(out.contains("Tor daemon"), "hint missing: {out}");
+    assert_eq!(
+        Config::load().unwrap().net,
+        NetMode::Socks5 {
+            addr: DEFAULT_SOCKS5_ADDR.into()
+        }
+    );
+
+    // custom socks5 proxy.
+    let (res, out) = run_standalone_capture(
+        net(NetCmd::Socks5 {
+            addr: "127.0.0.1:9150".into(),
+        }),
+        &mut config,
+        &mut p,
+    )
+    .await;
+    res.unwrap();
+    assert!(out.contains("127.0.0.1:9150"));
+    assert_eq!(
+        Config::load().unwrap().net,
+        NetMode::Socks5 {
+            addr: "127.0.0.1:9150".into()
+        }
+    );
+
+    // embedded tor saves even without the feature, but warns.
+    let (res, out) = run_standalone_capture(net(NetCmd::Embedded), &mut config, &mut p).await;
+    res.unwrap();
+    assert_eq!(Config::load().unwrap().net, NetMode::Tor);
+    if !commands::net_cmd::tor_feature_built() {
+        assert!(out.contains("warning"), "got: {out}");
+        assert!(out.contains("--features tor"), "got: {out}");
+    }
+
+    // back to clearnet.
+    let (res, out) = run_standalone_capture(net(NetCmd::Clearnet), &mut config, &mut p).await;
+    res.unwrap();
+    assert!(out.contains("clearnet"));
+    assert_eq!(Config::load().unwrap().net, NetMode::Clearnet);
+
+    std::env::remove_var("SHUKI_CONFIG");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn net_socks5_rejects_unparseable_addr() {
+    let _g = crate::config::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SHUKI_CONFIG", dir.path().join("config.json"));
+    let mut config = Config::default();
+    let mut p = StubPrompter::default();
+    for bad in ["nonsense", "127.0.0.1", ":9050", "host.example:9050"] {
+        let (res, _) = run_standalone_capture(
+            Command::Net {
+                cmd: NetCmd::Socks5 { addr: bad.into() },
+            },
+            &mut config,
+            &mut p,
+        )
+        .await;
+        assert!(matches!(res, Err(ShukiError::Config(_))), "addr {bad:?}");
+        assert_eq!(config.net, crate::config::NetMode::Clearnet, "addr {bad:?}");
+    }
+    std::env::remove_var("SHUKI_CONFIG");
+}
+
+#[tokio::test]
+async fn net_show_reports_mode_feature_and_relays() {
+    let config = Config {
+        relays: vec!["wss://r.example".into()],
+        net: crate::config::NetMode::Socks5 {
+            addr: "127.0.0.1:9050".into(),
+        },
+        ..Config::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut p = StubPrompter::default();
+    {
+        let mut ui = Ui {
+            prompter: &mut p,
+            out: &mut out,
+        };
+        commands::net_cmd::show(&config, &mut ui).unwrap();
+    }
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("mode:   socks5 (proxy 127.0.0.1:9050)"),
+        "got: {out}"
+    );
+    assert!(out.contains("embedded tor:"), "got: {out}");
+    assert!(out.contains("--features tor"), "got: {out}");
+    assert!(out.contains("relays: 1 configured"), "got: {out}");
+    assert!(out.contains("wss://r.example"), "got: {out}");
+}
+
+#[tokio::test]
+async fn net_test_without_relays_is_config_error() {
+    // Errors on the empty relay list before opening any connection.
+    let mut config = Config::default();
+    let mut p = StubPrompter::default();
+    let (res, _) =
+        run_standalone_capture(Command::Net { cmd: NetCmd::Test }, &mut config, &mut p).await;
+    match res {
+        Err(ShukiError::Config(msg)) => assert!(msg.contains("no relays")),
+        other => panic!("expected Config error, got {other:?}"),
+    }
 }
 
 // ----------------------------------------------------- report formatting

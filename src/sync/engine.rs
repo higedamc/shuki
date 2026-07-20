@@ -214,7 +214,9 @@ struct PushCtx<'a> {
 pub struct SyncEngine {
     signer: Arc<dyn Signer>,
     store: Arc<dyn VaultStore>,
-    config: Config,
+    /// Behind a lock so [`SyncApi::set_net_mode`] can switch the network
+    /// mode at runtime; each operation snapshots the config on entry.
+    config: tokio::sync::RwLock<Config>,
 }
 
 impl SyncEngine {
@@ -222,8 +224,13 @@ impl SyncEngine {
         Self {
             signer,
             store,
-            config,
+            config: tokio::sync::RwLock::new(config),
         }
+    }
+
+    /// Snapshot of the current config (relays + net mode).
+    async fn config_snapshot(&self) -> Config {
+        self.config.read().await.clone()
     }
 
     /// Self conversation key, or `None` when the backend cannot export one
@@ -545,7 +552,7 @@ impl SyncEngine {
 impl SyncApi for SyncEngine {
     async fn sync(&self) -> Result<SyncReport> {
         let mut report = SyncReport::default();
-        let client = relays::build_client(&self.config).await?;
+        let client = relays::build_client(&self.config_snapshot().await).await?;
         let outcome = self.sync_inner(&client, &mut report).await;
         client.disconnect().await;
         outcome?;
@@ -560,7 +567,7 @@ impl SyncApi for SyncEngine {
 
     async fn restore_all(&self) -> Result<SyncReport> {
         let mut report = SyncReport::default();
-        let client = relays::build_client(&self.config).await?;
+        let client = relays::build_client(&self.config_snapshot().await).await?;
         let outcome = self.restore_inner(&client, &mut report).await;
         client.disconnect().await;
         outcome?;
@@ -568,19 +575,35 @@ impl SyncApi for SyncEngine {
     }
 
     async fn publish_relay_list(&self) -> Result<()> {
-        let client = relays::build_client(&self.config).await?;
+        let config = self.config_snapshot().await;
+        let client = relays::build_client(&config).await?;
         let outcome =
-            relays::publish_relay_list(&client, self.signer.as_ref(), &self.config.relays).await;
+            relays::publish_relay_list(&client, self.signer.as_ref(), &config.relays).await;
         client.disconnect().await;
         outcome
     }
 
     async fn fetch_relay_list(&self) -> Result<Vec<String>> {
         let own_pk = self.signer.public_key().await?;
-        let client = relays::build_client(&self.config).await?;
+        let client = relays::build_client(&self.config_snapshot().await).await?;
         let outcome = relays::fetch_relay_list(&client, own_pk).await;
         client.disconnect().await;
         outcome
+    }
+
+    async fn set_net_mode(&self, net: crate::config::NetMode) -> Result<()> {
+        self.config.write().await.net = net;
+        Ok(())
+    }
+
+    async fn net_check(&self) -> Result<Vec<(String, Option<String>)>> {
+        let config = self.config_snapshot().await;
+        // `build_client` errors with a ShukiError::Config hint on an empty
+        // relay list, connects, and waits ~10s for the pool.
+        let client = relays::build_client(&config).await?;
+        let statuses = relays::relay_statuses(&client, &config.relays).await;
+        client.disconnect().await;
+        Ok(statuses)
     }
 }
 
@@ -883,6 +906,45 @@ mod tests {
             .decrypt_content(&pk, ck.as_ref(), "!!")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn set_net_mode_updates_engine_config() {
+        use crate::config::NetMode;
+
+        let engine = SyncEngine::new(
+            Arc::new(MockSigner::new()),
+            Arc::new(NopStore),
+            Config::default(),
+        );
+        assert_eq!(engine.config.read().await.net, NetMode::Clearnet);
+        engine
+            .set_net_mode(NetMode::Socks5 {
+                addr: "127.0.0.1:9050".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.config.read().await.net,
+            NetMode::Socks5 {
+                addr: "127.0.0.1:9050".into()
+            }
+        );
+        // Relays are untouched by a mode switch.
+        assert!(engine.config.read().await.relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn net_check_without_relays_is_config_error() {
+        let engine = SyncEngine::new(
+            Arc::new(MockSigner::new()),
+            Arc::new(NopStore),
+            Config::default(),
+        );
+        match engine.net_check().await {
+            Err(ShukiError::Config(msg)) => assert!(msg.contains("no relays")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
     }
 
     /// Store stub for tests that never touch the store.

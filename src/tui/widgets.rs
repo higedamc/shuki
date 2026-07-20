@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 use zeroize::Zeroizing;
 
+use crate::config::{NetMode, DEFAULT_SOCKS5_ADDR};
 use crate::domain::{Entry, EntryFields, SecretField, VaultPath};
 
 /// Which form field currently has focus.
@@ -244,6 +245,153 @@ impl RenameState {
     pub fn backspace(&mut self) {
         self.to.pop();
     }
+}
+
+/// Which network-mode row is selected in the network overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetChoice {
+    Clearnet,
+    /// External Tor daemon / any SOCKS5 proxy (editable address).
+    Socks5,
+    /// Embedded arti (needs a `--features tor` build).
+    Embedded,
+}
+
+const NET_CHOICES: [NetChoice; 3] = [NetChoice::Clearnet, NetChoice::Socks5, NetChoice::Embedded];
+
+/// State of the network-mode overlay (`t` in browse).
+#[derive(Debug)]
+pub struct NetworkState {
+    pub choice: NetChoice,
+    /// Editable SOCKS5 proxy address (host:port), used when
+    /// [`NetChoice::Socks5`] is applied.
+    pub addr: String,
+    /// A relay check is in flight.
+    pub checking: bool,
+    /// Last relay-check results: (relay url, error-or-None).
+    pub results: Option<Vec<(String, Option<String>)>>,
+}
+
+impl NetworkState {
+    /// Overlay prefilled from the current mode; the socks5 address defaults
+    /// to `127.0.0.1:9050` unless the config already carries one.
+    pub fn new(net: &NetMode) -> Self {
+        let (choice, addr) = match net {
+            NetMode::Clearnet => (NetChoice::Clearnet, DEFAULT_SOCKS5_ADDR.to_owned()),
+            NetMode::Socks5 { addr } => (NetChoice::Socks5, addr.clone()),
+            NetMode::Tor => (NetChoice::Embedded, DEFAULT_SOCKS5_ADDR.to_owned()),
+        };
+        Self {
+            choice,
+            addr,
+            checking: false,
+            results: None,
+        }
+    }
+
+    fn choice_index(&self) -> usize {
+        NET_CHOICES
+            .iter()
+            .position(|c| *c == self.choice)
+            .unwrap_or(0)
+    }
+
+    /// `j`/Down: select the next mode (clamped at the last row).
+    pub fn select_next(&mut self) {
+        let i = (self.choice_index() + 1).min(NET_CHOICES.len() - 1);
+        self.choice = NET_CHOICES[i];
+    }
+
+    /// `k`/Up: select the previous mode (clamped at the first row).
+    pub fn select_prev(&mut self) {
+        let i = self.choice_index().saturating_sub(1);
+        self.choice = NET_CHOICES[i];
+    }
+
+    /// Append a typed character to the socks5 address (socks5 row only).
+    pub fn input(&mut self, c: char) {
+        if c.is_control() || self.choice != NetChoice::Socks5 {
+            return;
+        }
+        self.addr.push(c);
+    }
+
+    /// Remove the last character of the socks5 address (socks5 row only).
+    pub fn backspace(&mut self) {
+        if self.choice == NetChoice::Socks5 {
+            self.addr.pop();
+        }
+    }
+
+    /// Validate and build the [`NetMode`] the selection maps to.
+    pub fn build_mode(&self) -> std::result::Result<NetMode, String> {
+        match self.choice {
+            NetChoice::Clearnet => Ok(NetMode::Clearnet),
+            NetChoice::Socks5 => {
+                let addr = self.addr.trim();
+                addr.parse::<std::net::SocketAddr>().map_err(|e| {
+                    format!("invalid socks5 address {addr:?} (expected host:port): {e}")
+                })?;
+                Ok(NetMode::Socks5 {
+                    addr: addr.to_owned(),
+                })
+            }
+            NetChoice::Embedded => Ok(NetMode::Tor),
+        }
+    }
+}
+
+/// Render the network-mode overlay centered over `full`.
+pub fn render_network(frame: &mut Frame, full: Rect, net: &NetworkState) {
+    let mut lines: Vec<Line> = Vec::new();
+    for choice in NET_CHOICES {
+        let marker = if choice == net.choice { "▸ " } else { "  " };
+        let label = match choice {
+            NetChoice::Clearnet => "clearnet".to_owned(),
+            NetChoice::Socks5 => {
+                if choice == net.choice {
+                    format!("socks5 proxy: {}▏ (type to edit)", net.addr)
+                } else {
+                    format!("socks5 proxy: {}", net.addr)
+                }
+            }
+            NetChoice::Embedded => {
+                if cfg!(feature = "tor") {
+                    "embedded tor (arti)".to_owned()
+                } else {
+                    "embedded tor (requires --features tor build)".to_owned()
+                }
+            }
+        };
+        let line = Line::raw(format!("{marker}{label}"));
+        if choice == net.choice {
+            lines.push(line.style(Style::default().add_modifier(Modifier::REVERSED)));
+        } else {
+            lines.push(line);
+        }
+    }
+    lines.push(Line::raw(""));
+    if net.checking {
+        lines.push(Line::raw("checking relays…"));
+    } else if let Some(results) = &net.results {
+        for (url, outcome) in results {
+            match outcome {
+                None => lines.push(Line::raw(format!("✓ {url}"))),
+                Some(why) => lines.push(Line::raw(format!("✗ {url}: {why}"))),
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "j/k: select   Enter: apply   c: check relays   Esc: close",
+    ));
+    let height = (lines.len() as u16).saturating_add(2);
+    let area = centered_rect(full, 70, height);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title("network mode")),
+        area,
+    );
 }
 
 /// Centered sub-rectangle: `percent_x` of the width, fixed `height` rows.

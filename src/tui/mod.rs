@@ -6,8 +6,8 @@
 //! spawning tasks (never blocking the draw loop). Left tree pane
 //! (tui-tree-widget, identifiers = full path strings) + right detail pane.
 //! Keys: `/` search, `y` copy (auto-clear), `a` add, `e` edit, `d` delete
-//! (confirm), `s` sync, `q` quit. Secrets render only after explicit reveal.
-//! Panic hook AND a Drop guard restore the terminal.
+//! (confirm), `s` sync, `t` network mode, `q` quit. Secrets render only after
+//! explicit reveal. Panic hook AND a Drop guard restore the terminal.
 
 pub mod actions;
 pub mod event;
@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use tui_tree_widget::{TreeItem, TreeState};
 
 use crate::clipboard::Clipboard;
+use crate::config::{Config, NetMode};
 use crate::domain::{Entry, VaultPath, VaultTree};
 use crate::error::ShukiError;
 use crate::sync::{SyncApi, SyncReport};
@@ -37,7 +38,7 @@ use crate::vault::Vault;
 use crate::Result;
 
 use actions::Action;
-pub use widgets::{FormState, RenameState};
+pub use widgets::{FormState, NetChoice, NetworkState, RenameState};
 
 /// The logged-in identity, shown in the header (shortened) and in the help
 /// overlay (full). Built by `main.rs` from the signer.
@@ -65,6 +66,9 @@ pub enum Mode {
     ConfirmDelete(VaultPath),
     /// Move/rename input overlay.
     Rename(RenameState),
+    /// Network-mode overlay (`t`): pick clearnet / socks5 / embedded tor,
+    /// check relay connectivity.
+    Network(NetworkState),
     /// Full-screen help overlay; closing restores the boxed previous mode.
     Help(Box<Mode>),
     /// A background task is running; the label is shown with a spinner.
@@ -92,6 +96,10 @@ pub enum TaskResult {
     Renamed(Result<()>, VaultPath, VaultPath),
     Synced(Result<SyncReport>),
     Copied(Result<()>),
+    /// Network mode applied (config saved + engine switched).
+    NetModeSet(Result<()>, NetMode),
+    /// Relay connectivity report: (relay url, error-or-None) per relay.
+    NetChecked(Result<Vec<(String, Option<String>)>>),
 }
 
 /// Side effects requested by [`update`]; executed by [`Executor::spawn`].
@@ -104,6 +112,11 @@ pub enum Effect {
     RenameEntry(VaultPath, VaultPath),
     RunSync,
     CopyPassword(VaultPath),
+    /// Persist `net` to the config file (spawn_blocking) and switch the
+    /// running sync engine via [`SyncApi::set_net_mode`].
+    SetNetMode(NetMode),
+    /// Probe every configured relay via [`SyncApi::net_check`].
+    NetCheck,
     Quit,
 }
 
@@ -134,6 +147,9 @@ pub struct AppState {
     pub spinner_frame: usize,
     /// Logged-in identity (header + help overlay).
     pub identity: Identity,
+    /// App config (net mode shown in the header; the saved file stays
+    /// authoritative — [`Effect::SetNetMode`] re-loads + saves it).
+    pub config: Config,
     /// Number of configured relays (sync guard + help overlay).
     pub relay_count: usize,
     pub clipboard_available: bool,
@@ -142,12 +158,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        identity: Identity,
-        relay_count: usize,
-        clipboard_available: bool,
-        clipboard_clear_secs: u64,
-    ) -> Self {
+    pub fn new(identity: Identity, config: Config, clipboard_available: bool) -> Self {
         Self {
             tree: VaultTree::default(),
             visible: VaultTree::default(),
@@ -160,9 +171,10 @@ impl AppState {
             status: String::new(),
             spinner_frame: 0,
             identity,
-            relay_count,
+            relay_count: config.relays.len(),
             clipboard_available,
-            clipboard_clear_secs,
+            clipboard_clear_secs: config.clipboard_clear_secs,
+            config,
             should_quit: false,
         }
     }
@@ -219,6 +231,19 @@ impl AppState {
             self.tree_state
                 .select(ids.first().cloned().unwrap_or_default());
         }
+    }
+}
+
+/// Short header/status tag for a [`NetMode`]: `clearnet` / `socks5:9050` /
+/// `tor(embedded)`.
+pub(crate) fn net_tag(net: &NetMode) -> String {
+    match net {
+        NetMode::Clearnet => "clearnet".to_owned(),
+        NetMode::Socks5 { addr } => {
+            let port = addr.rsplit(':').next().unwrap_or(addr.as_str());
+            format!("socks5:{port}")
+        }
+        NetMode::Tor => "tor(embedded)".to_owned(),
     }
 }
 
@@ -554,6 +579,65 @@ fn apply_action(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.mode = Mode::Browse;
             Vec::new()
         }
+        Action::OpenNetwork => {
+            state.mode = Mode::Network(NetworkState::new(&state.config.net));
+            Vec::new()
+        }
+        Action::NetSelectDown => {
+            if let Mode::Network(net) = &mut state.mode {
+                net.select_next();
+            }
+            Vec::new()
+        }
+        Action::NetSelectUp => {
+            if let Mode::Network(net) = &mut state.mode {
+                net.select_prev();
+            }
+            Vec::new()
+        }
+        Action::NetInput(c) => {
+            if let Mode::Network(net) = &mut state.mode {
+                net.input(c);
+            }
+            Vec::new()
+        }
+        Action::NetBackspace => {
+            if let Mode::Network(net) = &mut state.mode {
+                net.backspace();
+            }
+            Vec::new()
+        }
+        Action::NetApply => {
+            if let Mode::Network(net) = &state.mode {
+                match net.build_mode() {
+                    Ok(mode) => {
+                        state.mode = Mode::Busy("applying network mode".into());
+                        return vec![Effect::SetNetMode(mode)];
+                    }
+                    Err(msg) => state.status = format!("invalid: {msg}"),
+                }
+            }
+            Vec::new()
+        }
+        Action::NetCheck => {
+            if state.relay_count == 0 {
+                state.status =
+                    "no relays configured — add one with: shuki relay add wss://…".into();
+                return Vec::new();
+            }
+            if let Mode::Network(net) = &mut state.mode {
+                if !net.checking {
+                    net.checking = true;
+                    net.results = None;
+                    return vec![Effect::NetCheck];
+                }
+            }
+            Vec::new()
+        }
+        Action::NetClose => {
+            state.mode = Mode::Browse;
+            Vec::new()
+        }
         Action::FormCancel | Action::DismissError => {
             state.mode = Mode::Browse;
             Vec::new()
@@ -667,6 +751,34 @@ fn apply_task(state: &mut AppState, result: TaskResult) -> Vec<Effect> {
             };
             Vec::new()
         }
+        TaskResult::NetModeSet(Ok(()), net) => {
+            let mut status = format!("network: {}", net_tag(&net));
+            if matches!(net, NetMode::Tor) && !cfg!(feature = "tor") {
+                status.push_str(" — built without the tor feature; sync will error until rebuilt with --features tor");
+            }
+            state.config.net = net;
+            state.status = status;
+            state.mode = Mode::Browse;
+            Vec::new()
+        }
+        TaskResult::NetModeSet(Err(e), _) => {
+            state.mode = Mode::Error(format!("set network mode: {e}"));
+            Vec::new()
+        }
+        TaskResult::NetChecked(Ok(results)) => {
+            let ok = results.iter().filter(|(_, err)| err.is_none()).count();
+            let summary = format!("net check: {ok}/{} relay(s) reachable", results.len());
+            if let Mode::Network(net) = &mut state.mode {
+                net.checking = false;
+                net.results = Some(results);
+            }
+            state.status = summary;
+            Vec::new()
+        }
+        TaskResult::NetChecked(Err(e)) => {
+            state.mode = Mode::Error(format!("net check: {e}"));
+            Vec::new()
+        }
     }
 }
 
@@ -742,7 +854,26 @@ async fn run_effect(
         Effect::CopyPassword(path) => {
             TaskResult::Copied(copy_password(vault, clipboard, &path).await)
         }
+        Effect::SetNetMode(net) => {
+            let result = set_net_mode(sync, net.clone()).await;
+            TaskResult::NetModeSet(result, net)
+        }
+        Effect::NetCheck => TaskResult::NetChecked(sync.net_check().await),
     }
+}
+
+/// Persist `net` into the config file (re-load + save on the blocking pool,
+/// so the on-disk config stays authoritative) and switch the sync engine.
+async fn set_net_mode(sync: &dyn SyncApi, net: NetMode) -> Result<()> {
+    let to_save = net.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut config = Config::load()?;
+        config.net = to_save;
+        config.save()
+    })
+    .await
+    .map_err(|e| ShukiError::Other(format!("config save task: {e}")))??;
+    sync.set_net_mode(net).await
 }
 
 async fn load_entries(vault: &dyn Vault, opened: &AtomicBool) -> Result<Vec<VaultPath>> {
@@ -782,6 +913,17 @@ pub(crate) fn test_identity() -> Identity {
     }
 }
 
+/// Config fixture for the TUI unit tests: `relays` fake relay urls,
+/// clipboard clear TTL 45s, clearnet.
+#[cfg(test)]
+pub(crate) fn test_config(relays: usize) -> Config {
+    Config {
+        relays: (0..relays).map(|i| format!("wss://r{i}.example")).collect(),
+        clipboard_clear_secs: 45,
+        ..Config::default()
+    }
+}
+
 /// Restore the terminal (idempotent; used by the panic hook and Drop guard).
 fn restore_terminal() {
     let _ = disable_raw_mode();
@@ -809,14 +951,8 @@ pub async fn run(
 ) -> crate::Result<()> {
     let (tx, mut rx) = mpsc::channel::<AppMsg>(256);
     let clipboard_available = clipboard.is_some();
-    let relay_count = config.relays.len();
     let executor = Executor::new(vault, sync, clipboard, tx.clone());
-    let mut state = AppState::new(
-        identity,
-        relay_count,
-        clipboard_available,
-        config.clipboard_clear_secs,
-    );
+    let mut state = AppState::new(identity, config, clipboard_available);
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -958,6 +1094,8 @@ mod tests {
     #[derive(Default)]
     struct MockSyncApi {
         calls: AtomicUsize,
+        /// Every `set_net_mode` call, in order.
+        net_modes: Mutex<Vec<NetMode>>,
     }
 
     #[async_trait]
@@ -979,12 +1117,22 @@ mod tests {
         async fn fetch_relay_list(&self) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
+        async fn set_net_mode(&self, net: NetMode) -> Result<()> {
+            self.net_modes.lock().unwrap().push(net);
+            Ok(())
+        }
+        async fn net_check(&self) -> Result<Vec<(String, Option<String>)>> {
+            Ok(vec![
+                ("wss://r0.example".into(), None),
+                ("wss://r1.example".into(), Some("Disconnected".into())),
+            ])
+        }
     }
 
     // ---- helpers --------------------------------------------------------
 
     fn state_with(paths: &[&str]) -> AppState {
-        let mut state = AppState::new(test_identity(), 1, true, 45);
+        let mut state = AppState::new(test_identity(), test_config(1), true);
         let paths: Vec<VaultPath> = paths.iter().map(|p| VaultPath::parse(p).unwrap()).collect();
         let effects = update(&mut state, AppMsg::TaskDone(TaskResult::Entries(Ok(paths))));
         assert!(effects.is_empty());
@@ -1111,7 +1259,7 @@ mod tests {
 
     #[test]
     fn copy_without_clipboard_reports_unavailable() {
-        let mut state = AppState::new(test_identity(), 1, false, 45);
+        let mut state = AppState::new(test_identity(), test_config(1), false);
         update(
             &mut state,
             AppMsg::TaskDone(TaskResult::Entries(Ok(
@@ -1467,6 +1615,176 @@ mod tests {
         assert_eq!(state.spinner_frame, 1);
     }
 
+    // ---- reducer: network overlay ---------------------------------------
+
+    #[test]
+    fn network_overlay_opens_prefilled_and_closes() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        let Mode::Network(net) = &state.mode else {
+            panic!("expected network mode, got {:?}", state.mode);
+        };
+        assert_eq!(net.choice, NetChoice::Clearnet);
+        assert_eq!(net.addr, crate::config::DEFAULT_SOCKS5_ADDR);
+        press(&mut state, KeyCode::Esc);
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn network_overlay_prefills_from_socks5_config() {
+        let mut state = state_with(&[]);
+        state.config.net = NetMode::Socks5 {
+            addr: "10.0.0.1:9150".into(),
+        };
+        press_char(&mut state, 't');
+        let Mode::Network(net) = &state.mode else {
+            panic!("expected network mode");
+        };
+        assert_eq!(net.choice, NetChoice::Socks5);
+        assert_eq!(net.addr, "10.0.0.1:9150");
+    }
+
+    #[test]
+    fn network_apply_clearnet_emits_effect_and_updates_state_on_done() {
+        let mut state = state_with(&[]);
+        state.config.net = NetMode::Socks5 {
+            addr: "127.0.0.1:9050".into(),
+        };
+        press_char(&mut state, 't');
+        press_char(&mut state, 'k'); // socks5 → clearnet (clamped at top)
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(effects, vec![Effect::SetNetMode(NetMode::Clearnet)]);
+        assert!(matches!(state.mode, Mode::Busy(_)));
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::NetModeSet(Ok(()), NetMode::Clearnet)),
+        );
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.config.net, NetMode::Clearnet);
+        assert_eq!(state.status, "network: clearnet");
+    }
+
+    #[test]
+    fn network_apply_socks5_edits_addr_and_validates() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        press_char(&mut state, 'j'); // clearnet → socks5
+                                     // Rewrite the port: 127.0.0.1:9050 → 127.0.0.1:9150.
+        for _ in 0..4 {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_str(&mut state, "9150");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            vec![Effect::SetNetMode(NetMode::Socks5 {
+                addr: "127.0.0.1:9150".into()
+            })]
+        );
+
+        // Invalid address: stays in the overlay with a status hint.
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        press_char(&mut state, 'j');
+        for _ in 0.."127.0.0.1:9050".len() {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_str(&mut state, "not an addr");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.is_empty());
+        assert!(matches!(state.mode, Mode::Network(_)));
+        assert!(state.status.starts_with("invalid:"), "{}", state.status);
+    }
+
+    #[test]
+    fn network_apply_embedded_warns_without_tor_feature() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j'); // clearnet → socks5 → embedded
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(effects, vec![Effect::SetNetMode(NetMode::Tor)]);
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::NetModeSet(Ok(()), NetMode::Tor)),
+        );
+        assert_eq!(state.config.net, NetMode::Tor);
+        assert!(state.status.starts_with("network: tor(embedded)"));
+        if !cfg!(feature = "tor") {
+            assert!(state.status.contains("--features tor"), "{}", state.status);
+        }
+    }
+
+    #[test]
+    fn network_check_flow_shows_results_in_overlay() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        let effects = press_char(&mut state, 'c');
+        assert_eq!(effects, vec![Effect::NetCheck]);
+        let Mode::Network(net) = &state.mode else {
+            panic!("expected network mode");
+        };
+        assert!(net.checking);
+        // A second `c` while checking is a no-op.
+        assert!(press_char(&mut state, 'c').is_empty());
+        let results = vec![
+            ("wss://r0.example".to_owned(), None),
+            (
+                "wss://r1.example".to_owned(),
+                Some("Disconnected".to_owned()),
+            ),
+        ];
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::NetChecked(Ok(results.clone()))),
+        );
+        let Mode::Network(net) = &state.mode else {
+            panic!("expected network mode");
+        };
+        assert!(!net.checking);
+        assert_eq!(net.results, Some(results));
+        assert_eq!(state.status, "net check: 1/2 relay(s) reachable");
+    }
+
+    #[test]
+    fn network_check_without_relays_sets_status() {
+        let mut state = state_with(&[]);
+        state.relay_count = 0;
+        press_char(&mut state, 't');
+        let effects = press_char(&mut state, 'c');
+        assert!(effects.is_empty());
+        assert!(state.status.contains("no relays configured"));
+    }
+
+    #[test]
+    fn network_check_error_enters_error_mode() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 't');
+        press_char(&mut state, 'c');
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::NetChecked(Err(ShukiError::Relay(
+                "down".into(),
+            )))),
+        );
+        let Mode::Error(msg) = &state.mode else {
+            panic!("expected error mode, got {:?}", state.mode);
+        };
+        assert!(msg.contains("net check"));
+    }
+
+    #[test]
+    fn net_tag_labels() {
+        assert_eq!(net_tag(&NetMode::Clearnet), "clearnet");
+        assert_eq!(
+            net_tag(&NetMode::Socks5 {
+                addr: "127.0.0.1:9050".into()
+            }),
+            "socks5:9050"
+        );
+        assert_eq!(net_tag(&NetMode::Tor), "tor(embedded)");
+    }
+
     // ---- effect execution (executor + mocks) ----------------------------
 
     async fn executor_with(
@@ -1570,6 +1888,44 @@ mod tests {
         };
         assert_eq!(report.pushed, 2);
         assert_eq!(sync.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    // The std-mutex env lock serializes env-mutating tests; held across
+    // mocked awaits on purpose.
+    #[allow(clippy::await_holding_lock)]
+    async fn set_net_mode_effect_saves_config_and_switches_engine() {
+        let _g = crate::config::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SHUKI_CONFIG", dir.path().join("config.json"));
+        Config::default().save().unwrap();
+
+        let sync = Arc::new(MockSyncApi::default());
+        let (executor, mut rx) =
+            executor_with(Arc::new(MockVault::default()), Arc::clone(&sync)).await;
+        let net = NetMode::Socks5 {
+            addr: "127.0.0.1:9150".into(),
+        };
+        let result = run_one(&executor, &mut rx, Effect::SetNetMode(net.clone())).await;
+        assert!(matches!(result, TaskResult::NetModeSet(Ok(()), ref n) if *n == net));
+        // Saved file is authoritative…
+        assert_eq!(Config::load().unwrap().net, net);
+        // …and the running engine was switched too.
+        assert_eq!(sync.net_modes.lock().unwrap().as_slice(), &[net]);
+
+        std::env::remove_var("SHUKI_CONFIG");
+    }
+
+    #[tokio::test]
+    async fn net_check_effect_returns_canned_results() {
+        let (executor, mut rx) =
+            executor_with(Arc::new(MockVault::default()), Arc::default()).await;
+        let result = run_one(&executor, &mut rx, Effect::NetCheck).await;
+        let TaskResult::NetChecked(Ok(results)) = result else {
+            panic!("expected net check results");
+        };
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], ("wss://r0.example".to_owned(), None));
     }
 
     #[tokio::test]

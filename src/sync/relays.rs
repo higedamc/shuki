@@ -70,6 +70,34 @@ fn embedded_tor_client() -> Result<Client> {
     ))
 }
 
+/// Report the connection status of every `relays` url on `client`:
+/// `None` = connected, `Some(status)` = the relay's current
+/// [`nostr_sdk::RelayStatus`] (or why it could not be looked up). Never
+/// hard-fails on a single relay.
+pub async fn relay_statuses(client: &Client, relays: &[String]) -> Vec<(String, Option<String>)> {
+    let pool = client.relays().await;
+    relays
+        .iter()
+        .map(|url| {
+            let outcome = match RelayUrl::parse(url) {
+                Ok(parsed) => match pool.get(&parsed) {
+                    Some(relay) => {
+                        let status = relay.status();
+                        if matches!(status, nostr_sdk::RelayStatus::Connected) {
+                            None
+                        } else {
+                            Some(status.to_string())
+                        }
+                    }
+                    None => Some("not in relay pool".to_owned()),
+                },
+                Err(e) => Some(format!("invalid url: {e}")),
+            };
+            (url.clone(), outcome)
+        })
+        .collect()
+}
+
 /// Publish our relay list as a NIP-65 kind-10002 event, signed by `signer`.
 pub async fn publish_relay_list(
     client: &Client,

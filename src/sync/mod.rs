@@ -35,4 +35,12 @@ pub trait SyncApi: Send + Sync {
 
     /// Fetch our NIP-65 relay list from the configured relays.
     async fn fetch_relay_list(&self) -> Result<Vec<String>>;
+
+    /// Switch the network mode used for subsequent relay connections.
+    async fn set_net_mode(&self, net: crate::config::NetMode) -> Result<()>;
+
+    /// Try to connect to every configured relay through the current mode.
+    /// Returns (relay_url, error-or-None) per relay; never hard-fails on a
+    /// single relay.
+    async fn net_check(&self) -> Result<Vec<(String, Option<String>)>>;
 }
