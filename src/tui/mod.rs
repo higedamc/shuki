@@ -37,7 +37,17 @@ use crate::vault::Vault;
 use crate::Result;
 
 use actions::Action;
-pub use widgets::FormState;
+pub use widgets::{FormState, RenameState};
+
+/// The logged-in identity, shown in the header (shortened) and in the help
+/// overlay (full). Built by `main.rs` from the signer.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    /// Full bech32 npub.
+    pub npub: String,
+    /// Short signer backend label, e.g. "software" or "nsd".
+    pub signer_label: String,
+}
 
 /// UI mode (drives the keymap and the right pane).
 #[derive(Debug)]
@@ -53,6 +63,10 @@ pub enum Mode {
     Form(FormState),
     /// Waiting for `y`/`n` on deleting this path.
     ConfirmDelete(VaultPath),
+    /// Move/rename input overlay.
+    Rename(RenameState),
+    /// Full-screen help overlay; closing restores the boxed previous mode.
+    Help(Box<Mode>),
     /// A background task is running; the label is shown with a spinner.
     Busy(String),
     Error(String),
@@ -75,6 +89,7 @@ pub enum TaskResult {
     Entry(Result<Entry>),
     Saved(Result<()>, VaultPath),
     Deleted(Result<()>, VaultPath),
+    Renamed(Result<()>, VaultPath, VaultPath),
     Synced(Result<SyncReport>),
     Copied(Result<()>),
 }
@@ -86,6 +101,7 @@ pub enum Effect {
     LoadEntry(VaultPath),
     SaveEntry(Entry),
     DeleteEntry(VaultPath),
+    RenameEntry(VaultPath, VaultPath),
     RunSync,
     CopyPassword(VaultPath),
     Quit,
@@ -116,13 +132,22 @@ pub struct AppState {
     /// Last status-bar message.
     pub status: String,
     pub spinner_frame: usize,
+    /// Logged-in identity (header + help overlay).
+    pub identity: Identity,
+    /// Number of configured relays (sync guard + help overlay).
+    pub relay_count: usize,
     pub clipboard_available: bool,
     pub clipboard_clear_secs: u64,
     pub should_quit: bool,
 }
 
 impl AppState {
-    pub fn new(clipboard_available: bool, clipboard_clear_secs: u64) -> Self {
+    pub fn new(
+        identity: Identity,
+        relay_count: usize,
+        clipboard_available: bool,
+        clipboard_clear_secs: u64,
+    ) -> Self {
         Self {
             tree: VaultTree::default(),
             visible: VaultTree::default(),
@@ -134,6 +159,8 @@ impl AppState {
             current: None,
             status: String::new(),
             spinner_frame: 0,
+            identity,
+            relay_count,
             clipboard_available,
             clipboard_clear_secs,
             should_quit: false,
@@ -394,6 +421,12 @@ fn apply_action(state: &mut AppState, action: Action) -> Vec<Effect> {
             Vec::new()
         }
         Action::StartSync => {
+            if state.relay_count == 0 {
+                state.mode = Mode::Error(
+                    "no relays configured — add one with: shuki relay add wss://…".into(),
+                );
+                return Vec::new();
+            }
             state.mode = Mode::Busy("syncing".into());
             vec![Effect::RunSync]
         }
@@ -451,6 +484,74 @@ fn apply_action(state: &mut AppState, action: Action) -> Vec<Effect> {
                     Err(msg) => state.status = format!("invalid: {msg}"),
                 }
             }
+            Vec::new()
+        }
+        Action::FormGeneratePassword => {
+            if let Mode::Form(form) = &mut state.mode {
+                if form.focus == widgets::FormFocus::Password {
+                    match crate::crypto::passgen::generate(
+                        &crate::crypto::passgen::PassSpec::default(),
+                    ) {
+                        Ok(password) => {
+                            form.set_password(password.expose());
+                            state.status = "generated 24-char password — Ctrl-g regenerates".into();
+                        }
+                        Err(e) => state.status = format!("generate failed: {e}"),
+                    }
+                }
+            }
+            Vec::new()
+        }
+        Action::OpenHelp => {
+            let prev = std::mem::replace(&mut state.mode, Mode::Browse);
+            state.mode = Mode::Help(Box::new(prev));
+            Vec::new()
+        }
+        Action::CloseHelp => {
+            if let Mode::Help(prev) = std::mem::replace(&mut state.mode, Mode::Browse) {
+                state.mode = *prev;
+            }
+            Vec::new()
+        }
+        Action::StartRename => {
+            let path = match &state.mode {
+                Mode::Detail { .. } => state.current.as_ref().map(|e| e.path.clone()),
+                _ => state.selected_entry(),
+            };
+            match path {
+                Some(from) => state.mode = Mode::Rename(RenameState::new(from)),
+                None => state.status = "no entry selected".into(),
+            }
+            Vec::new()
+        }
+        Action::RenameInput(c) => {
+            if let Mode::Rename(rename) = &mut state.mode {
+                rename.input(c);
+            }
+            Vec::new()
+        }
+        Action::RenameBackspace => {
+            if let Mode::Rename(rename) = &mut state.mode {
+                rename.backspace();
+            }
+            Vec::new()
+        }
+        Action::RenameSubmit => {
+            if let Mode::Rename(rename) = &state.mode {
+                match VaultPath::parse(rename.to.trim()) {
+                    Ok(to) => {
+                        let from = rename.from.clone();
+                        state.mode = Mode::Busy("renaming".into());
+                        return vec![Effect::RenameEntry(from, to)];
+                    }
+                    Err(e) => state.mode = Mode::Error(format!("invalid path: {e}")),
+                }
+            }
+            Vec::new()
+        }
+        Action::RenameCancel => {
+            state.current = None;
+            state.mode = Mode::Browse;
             Vec::new()
         }
         Action::FormCancel | Action::DismissError => {
@@ -527,6 +628,16 @@ fn apply_task(state: &mut AppState, result: TaskResult) -> Vec<Effect> {
         }
         TaskResult::Deleted(Err(e), path) => {
             state.mode = Mode::Error(format!("delete {path}: {e}"));
+            Vec::new()
+        }
+        TaskResult::Renamed(Ok(()), from, to) => {
+            state.status = format!("moved {from} -> {to}");
+            state.current = None;
+            state.mode = Mode::Browse;
+            vec![Effect::LoadEntries]
+        }
+        TaskResult::Renamed(Err(e), from, to) => {
+            state.mode = Mode::Error(format!("rename {from} -> {to}: {e}"));
             Vec::new()
         }
         TaskResult::Synced(Ok(report)) => {
@@ -623,6 +734,10 @@ async fn run_effect(
             let result = vault.remove(&path).await;
             TaskResult::Deleted(result, path)
         }
+        Effect::RenameEntry(from, to) => {
+            let result = vault.rename(&from, &to).await;
+            TaskResult::Renamed(result, from, to)
+        }
         Effect::RunSync => TaskResult::Synced(sync.sync().await),
         Effect::CopyPassword(path) => {
             TaskResult::Copied(copy_password(vault, clipboard, &path).await)
@@ -653,6 +768,20 @@ async fn copy_password(
     clipboard.copy_secret(password)
 }
 
+/// Full-length npub used by the TUI unit tests.
+#[cfg(test)]
+pub(crate) const TEST_NPUB: &str =
+    "npub1zvxkq3jwv2yfxwv7t2z0tuuq6a0kdyv2mfmev6t9zjmalphzu6dq7q35xk";
+
+/// Identity fixture for the TUI unit tests.
+#[cfg(test)]
+pub(crate) fn test_identity() -> Identity {
+    Identity {
+        npub: TEST_NPUB.into(),
+        signer_label: "software".into(),
+    }
+}
+
 /// Restore the terminal (idempotent; used by the panic hook and Drop guard).
 fn restore_terminal() {
     let _ = disable_raw_mode();
@@ -669,16 +798,25 @@ impl Drop for TerminalGuard {
 }
 
 /// Run the TUI until the user quits. Entry point wired from `main.rs`.
+/// `identity` is the logged-in identity (npub + signer backend label), shown
+/// in the header and the help overlay.
 pub async fn run(
     vault: Arc<dyn Vault>,
     sync: Arc<dyn SyncApi>,
     clipboard: Option<Arc<crate::clipboard::Clipboard>>,
     config: crate::config::Config,
+    identity: Identity,
 ) -> crate::Result<()> {
     let (tx, mut rx) = mpsc::channel::<AppMsg>(256);
     let clipboard_available = clipboard.is_some();
+    let relay_count = config.relays.len();
     let executor = Executor::new(vault, sync, clipboard, tx.clone());
-    let mut state = AppState::new(clipboard_available, config.clipboard_clear_secs);
+    let mut state = AppState::new(
+        identity,
+        relay_count,
+        clipboard_available,
+        config.clipboard_clear_secs,
+    );
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
@@ -846,7 +984,7 @@ mod tests {
     // ---- helpers --------------------------------------------------------
 
     fn state_with(paths: &[&str]) -> AppState {
-        let mut state = AppState::new(true, 45);
+        let mut state = AppState::new(test_identity(), 1, true, 45);
         let paths: Vec<VaultPath> = paths.iter().map(|p| VaultPath::parse(p).unwrap()).collect();
         let effects = update(&mut state, AppMsg::TaskDone(TaskResult::Entries(Ok(paths))));
         assert!(effects.is_empty());
@@ -973,7 +1111,7 @@ mod tests {
 
     #[test]
     fn copy_without_clipboard_reports_unavailable() {
-        let mut state = AppState::new(false, 45);
+        let mut state = AppState::new(test_identity(), 1, false, 45);
         update(
             &mut state,
             AppMsg::TaskDone(TaskResult::Entries(Ok(
@@ -1102,7 +1240,184 @@ mod tests {
         assert_eq!(state.status, "deleted b");
     }
 
+    // ---- reducer: rename ------------------------------------------------
+
+    #[test]
+    fn rename_flow_from_browse_prefills_and_emits_effect() {
+        let mut state = state_with(&["a/b"]);
+        press_char(&mut state, 'l'); // expand "a"
+        press_char(&mut state, 'j'); // select "a/b"
+        assert_eq!(
+            state.selected_entry(),
+            Some(VaultPath::parse("a/b").unwrap())
+        );
+        press_char(&mut state, 'm');
+        let Mode::Rename(rename) = &state.mode else {
+            panic!("expected rename mode, got {:?}", state.mode);
+        };
+        assert_eq!(rename.to, "a/b"); // prefilled with the current path
+                                      // Edit the target: "a/b" → "a/c".
+        press(&mut state, KeyCode::Backspace);
+        press_char(&mut state, 'c');
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            vec![Effect::RenameEntry(
+                VaultPath::parse("a/b").unwrap(),
+                VaultPath::parse("a/c").unwrap()
+            )]
+        );
+        assert!(matches!(state.mode, Mode::Busy(_)));
+        let effects = update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::Renamed(
+                Ok(()),
+                VaultPath::parse("a/b").unwrap(),
+                VaultPath::parse("a/c").unwrap(),
+            )),
+        );
+        assert_eq!(effects, vec![Effect::LoadEntries]);
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.status, "moved a/b -> a/c");
+    }
+
+    #[test]
+    fn rename_from_detail_targets_loaded_entry() {
+        let mut state = state_with(&["b"]);
+        press(&mut state, KeyCode::Enter);
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::Entry(Ok(entry("b", "pw")))),
+        );
+        assert!(matches!(state.mode, Mode::Detail { .. }));
+        press_char(&mut state, 'm');
+        let Mode::Rename(rename) = &state.mode else {
+            panic!("expected rename mode");
+        };
+        assert_eq!(rename.from.as_str(), "b");
+        assert_eq!(rename.to, "b");
+        // Esc cancels back to browse.
+        press(&mut state, KeyCode::Esc);
+        assert!(matches!(state.mode, Mode::Browse));
+        assert!(state.current.is_none());
+    }
+
+    #[test]
+    fn rename_invalid_path_enters_error_mode() {
+        let mut state = state_with(&["b"]);
+        press_char(&mut state, 'm');
+        // "b" → "/bad/" (invalid path).
+        press(&mut state, KeyCode::Backspace);
+        type_str(&mut state, "/bad/");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(effects.is_empty());
+        assert!(matches!(state.mode, Mode::Error(_)));
+        press(&mut state, KeyCode::Esc);
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn rename_without_selection_sets_status() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 'm');
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.status, "no entry selected");
+    }
+
+    #[test]
+    fn rename_task_error_enters_error_mode() {
+        let mut state = state_with(&["b"]);
+        state.mode = Mode::Busy("renaming".into());
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::Renamed(
+                Err(ShukiError::NotFound("b".into())),
+                VaultPath::parse("b").unwrap(),
+                VaultPath::parse("c").unwrap(),
+            )),
+        );
+        let Mode::Error(msg) = &state.mode else {
+            panic!("expected error mode");
+        };
+        assert!(msg.contains("rename b -> c"));
+    }
+
+    // ---- reducer: help overlay -----------------------------------------
+
+    #[test]
+    fn help_opens_from_browse_and_any_key_closes() {
+        let mut state = state_with(&["b"]);
+        press_char(&mut state, '?');
+        assert!(matches!(state.mode, Mode::Help(_)));
+        press_char(&mut state, 'x'); // any key closes
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn help_from_detail_restores_detail_with_reveal() {
+        let mut state = state_with(&["b"]);
+        press(&mut state, KeyCode::Enter);
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::Entry(Ok(entry("b", "pw")))),
+        );
+        press_char(&mut state, 'r'); // reveal
+        press_char(&mut state, '?');
+        assert!(matches!(state.mode, Mode::Help(_)));
+        press(&mut state, KeyCode::Esc);
+        assert!(matches!(state.mode, Mode::Detail { reveal: true }));
+    }
+
+    // ---- reducer: form password generation ------------------------------
+
+    #[test]
+    fn ctrl_g_fills_password_only_when_password_focused() {
+        let mut state = state_with(&[]);
+        press_char(&mut state, 'a');
+        let gen = AppMsg::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        // Path field focused: no generation.
+        update(&mut state, gen);
+        let Mode::Form(form) = &state.mode else {
+            panic!("expected form");
+        };
+        assert!(form.password.is_empty());
+        // Focus the password field (path → username → password).
+        press(&mut state, KeyCode::Tab);
+        press(&mut state, KeyCode::Tab);
+        let gen = AppMsg::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        update(&mut state, gen);
+        let Mode::Form(form) = &state.mode else {
+            panic!("expected form");
+        };
+        assert_eq!(form.password.chars().count(), 24);
+        assert_eq!(
+            state.status,
+            "generated 24-char password — Ctrl-g regenerates"
+        );
+        // Regenerate: a fresh password each press.
+        let first = form.password.clone();
+        let gen = AppMsg::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        update(&mut state, gen);
+        let Mode::Form(form) = &state.mode else {
+            panic!("expected form");
+        };
+        assert_ne!(*form.password, *first);
+    }
+
     // ---- reducer: sync / quit / error ----------------------------------
+
+    #[test]
+    fn sync_without_relays_errors_with_hint() {
+        let mut state = state_with(&[]);
+        state.relay_count = 0;
+        let effects = press_char(&mut state, 's');
+        assert!(effects.is_empty());
+        let Mode::Error(msg) = &state.mode else {
+            panic!("expected error mode, got {:?}", state.mode);
+        };
+        assert!(msg.contains("no relays configured"));
+        assert!(msg.contains("shuki relay add"));
+    }
 
     #[test]
     fn sync_flow_busy_then_report_in_status() {
@@ -1211,6 +1526,24 @@ mod tests {
         .await;
         assert!(matches!(result, TaskResult::Deleted(Ok(()), _)));
         assert!(vault.entries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_entry_effect_moves_in_vault() {
+        let vault = Arc::new(MockVault::with(&["a/b"]));
+        let (executor, mut rx) = executor_with(Arc::clone(&vault), Arc::default()).await;
+        let result = run_one(
+            &executor,
+            &mut rx,
+            Effect::RenameEntry(
+                VaultPath::parse("a/b").unwrap(),
+                VaultPath::parse("a/c").unwrap(),
+            ),
+        )
+        .await;
+        assert!(matches!(result, TaskResult::Renamed(Ok(()), _, _)));
+        assert!(vault.get(&VaultPath::parse("a/c").unwrap()).await.is_ok());
+        assert!(vault.get(&VaultPath::parse("a/b").unwrap()).await.is_err());
     }
 
     #[tokio::test]

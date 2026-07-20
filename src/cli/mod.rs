@@ -1,7 +1,7 @@
 //! CLI surface (owned by `leaf/cli-commands-all`).
 //!
 //! Commands: init, ls, show [-c], insert, generate, edit, rm, mv, find,
-//! sync, restore, relay add/rm/ls, key export/import. No args → TUI
+//! sync, restore, relay add/rm/ls, key export/import, whoami. No args → TUI
 //! (dispatched by `main.rs` in the integration phase).
 //!
 //! # `main.rs` integration
@@ -138,6 +138,8 @@ pub enum Command {
         #[command(subcommand)]
         cmd: KeyCmd,
     },
+    /// Show the logged-in identity (npub, signer backend, config, relays)
+    Whoami,
 }
 
 #[derive(Subcommand)]
@@ -172,12 +174,14 @@ pub struct AppContext {
 }
 
 /// Whether `main.rs` must build an [`AppContext`] (vault + signer + sync)
-/// before dispatching. `false` for Init / Key / Relay, which only touch the
-/// [`Config`] and the keychain — route those through [`dispatch_standalone`].
+/// before dispatching. `false` for Init / Key / Relay / Whoami, which only
+/// touch the [`Config`] and the keychain (whoami additionally probes an NSD
+/// device, degrading gracefully) — route those through
+/// [`dispatch_standalone`].
 pub fn needs_vault(cmd: &Command) -> bool {
     !matches!(
         cmd,
-        Command::Init { .. } | Command::Key { .. } | Command::Relay { .. }
+        Command::Init { .. } | Command::Key { .. } | Command::Relay { .. } | Command::Whoami
     )
 }
 
@@ -195,7 +199,7 @@ pub async fn dispatch(cmd: Command, ctx: &mut AppContext) -> Result<()> {
 }
 
 /// Run a command that needs no vault: Init, Key export/import, Relay
-/// add/rm/ls. Mutates + saves `config` where applicable.
+/// add/rm/ls, Whoami. Mutates + saves `config` where applicable.
 pub async fn dispatch_standalone(cmd: Command, config: &mut Config) -> Result<()> {
     let mut prompter = StdPrompter;
     let mut out = std::io::stdout();
@@ -208,7 +212,7 @@ pub async fn dispatch_standalone(cmd: Command, config: &mut Config) -> Result<()
 
 async fn dispatch_with(cmd: Command, ctx: &mut AppContext, ui: &mut Ui<'_>) -> Result<()> {
     match cmd {
-        Command::Init { .. } | Command::Relay { .. } | Command::Key { .. } => {
+        Command::Init { .. } | Command::Relay { .. } | Command::Key { .. } | Command::Whoami => {
             dispatch_standalone_with(cmd, &mut ctx.config, ui).await
         }
         Command::Sync => commands::sync_cmd::sync(ctx, ui).await,
@@ -278,6 +282,7 @@ async fn dispatch_standalone_with(
             KeyCmd::Export => commands::key_cmd::export(ui).await,
             KeyCmd::Import { value } => commands::key_cmd::import(ui, value).await,
         },
+        Command::Whoami => commands::whoami::run(config, ui).await,
         _ => Err(ShukiError::Other(
             "internal: this command needs a vault; route it through `dispatch`".into(),
         )),

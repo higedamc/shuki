@@ -22,7 +22,7 @@ use base64::Engine as _;
 use nostr::nips::nip44::v2::ConversationKey;
 use nostr::nips::nip44::{self, v2 as nip44v2};
 use nostr::secp256k1::schnorr::Signature;
-use nostr::{Event, PublicKey, UnsignedEvent};
+use nostr::{Event, Kind, PublicKey, Timestamp, UnsignedEvent};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use zeroize::Zeroizing;
 
@@ -192,6 +192,44 @@ impl NsdSigner {
         let x = self.shared_secret_x(peer).await?;
         Ok(conversation_key_from_shared_x(&x))
     }
+
+    /// Physical-presence login challenge: sign — and discard — a throwaway
+    /// NIP-42 client-auth event (kind 22242, never published). `/shared-secret`
+    /// may not require on-device confirmation, but `/sign-message` always
+    /// does, so a merely plugged-in device cannot silently decrypt the vault.
+    ///
+    /// Rejection on the device surfaces as [`ShukiError::DeviceRejected`],
+    /// no button press within the sign timeout as
+    /// [`ShukiError::DeviceTimeout`].
+    pub async fn authenticate(&self) -> Result<()> {
+        let nonce = login_nonce();
+        self.authenticate_challenge(&nonce, Timestamp::now()).await
+    }
+
+    /// Testable core of [`Self::authenticate`]: fixed nonce + timestamp so
+    /// tests can pre-compute the challenge id and script the wire.
+    async fn authenticate_challenge(&self, nonce: &str, created_at: Timestamp) -> Result<()> {
+        let pubkey = self.device_public_key().await?;
+        let unsigned = UnsignedEvent::new(
+            pubkey,
+            created_at,
+            Kind::Authentication,
+            [],
+            format!("shuki login {nonce}"),
+        );
+        tracing::info!("confirm the login request on the device");
+        // `sign_event` verifies the signature and pubkey; the event itself
+        // is discarded — it exists only to force the button press.
+        self.sign_event(unsigned).await.map(|_event| ())
+    }
+}
+
+/// 16-byte CSPRNG nonce, hex-encoded, for the login challenge content.
+fn login_nonce() -> String {
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[async_trait]
@@ -505,6 +543,72 @@ mod tests {
             ShukiError::Device(msg) => assert!(msg.contains("does not match")),
             e => panic!("unexpected error: {e}"),
         }
+    }
+
+    #[tokio::test]
+    async fn authenticate_signs_and_discards_login_challenge() {
+        let keys = Keys::generate();
+        let nonce = "00112233445566778899aabbccddeeff";
+        let ts = Timestamp::from(1_700_000_000u64);
+        // Rebuild the exact challenge to pre-sign it host-side.
+        let unsigned = UnsignedEvent::new(
+            keys.public_key(),
+            ts,
+            Kind::Authentication,
+            [],
+            format!("shuki login {nonce}"),
+        );
+        let expected = unsigned.clone().sign_with_keys(&keys).unwrap();
+        let id_hex = unsigned.clone().id().to_hex();
+        let (w, r) = public_key_exchange(&keys);
+        let mock = MockTransport::new().expect(w, r).expect(
+            format!("/sign-message {id_hex}"),
+            vec![
+                MockLine::line("/log please confirm on device"),
+                MockLine::line(format!("/sign-message {}", expected.sig)),
+            ],
+        );
+        let signer = NsdSigner::with_transport(mock.boxed()).unwrap();
+        signer.authenticate_challenge(nonce, ts).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticate_rejected_on_device() {
+        let keys = Keys::generate();
+        let (w, r) = public_key_exchange(&keys);
+        // The nonce is random, so match the sign request by prefix.
+        let mock = MockTransport::new().expect(w, r).expect_prefix(
+            "/sign-message ",
+            vec![MockLine::line("/sign-message Rejected")],
+        );
+        let signer = NsdSigner::with_transport(mock.boxed()).unwrap();
+        assert!(matches!(
+            signer.authenticate().await,
+            Err(ShukiError::DeviceRejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn authenticate_timeout_maps_to_device_timeout() {
+        let keys = Keys::generate();
+        let (w, r) = public_key_exchange(&keys);
+        let mock = MockTransport::new()
+            .expect(w, r)
+            .expect_prefix("/sign-message ", vec![MockLine::Timeout]);
+        let signer = NsdSigner::with_transport(mock.boxed()).unwrap();
+        assert!(matches!(
+            signer.authenticate().await,
+            Err(ShukiError::DeviceTimeout)
+        ));
+    }
+
+    #[test]
+    fn login_nonce_is_32_hex_chars_and_random() {
+        let a = login_nonce();
+        let b = login_nonce();
+        assert_eq!(a.len(), 32);
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[tokio::test]

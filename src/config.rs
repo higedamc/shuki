@@ -44,6 +44,10 @@ pub struct Config {
     pub net: NetMode,
     #[serde(default = "default_clipboard_clear_secs")]
     pub clipboard_clear_secs: u64,
+    /// Require a signing confirmation on the hardware device before opening
+    /// the vault (NSD only).
+    #[serde(default = "default_device_auth_on_open")]
+    pub device_auth_on_open: bool,
     /// Override the data directory (default: platform data dir + "shuki").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
@@ -53,6 +57,10 @@ fn default_clipboard_clear_secs() -> u64 {
     DEFAULT_CLIPBOARD_CLEAR_SECS
 }
 
+fn default_device_auth_on_open() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -60,6 +68,7 @@ impl Default for Config {
             relays: Vec::new(),
             net: NetMode::default(),
             clipboard_clear_secs: DEFAULT_CLIPBOARD_CLEAR_SECS,
+            device_auth_on_open: true,
             data_dir: None,
         }
     }
@@ -201,6 +210,12 @@ mod tests {
             }
         );
         assert_eq!(nsd.clipboard_clear_secs, DEFAULT_CLIPBOARD_CLEAR_SECS);
+        // A config file missing the field defaults to requiring device auth.
+        assert!(nsd.device_auth_on_open);
+        assert!(Config::default().device_auth_on_open);
+
+        let disabled: Config = serde_json::from_str(r#"{"device_auth_on_open":false}"#).unwrap();
+        assert!(!disabled.device_auth_on_open);
     }
 
     fn clear_env() {
