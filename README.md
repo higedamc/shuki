@@ -59,6 +59,7 @@ shuki net clearnet             # back to direct connections
 shuki net test                 # per-relay ✓/✗ through the current mode
 shuki key export               # print NIP-49 ncryptsec cold backup
 shuki whoami                   # identity, signer backend, config/data paths
+shuki lock                     # end the NSD login session (next use re-confirms)
 shuki                          # no args → TUI
 ```
 
@@ -80,6 +81,7 @@ in the header. Press `?` for the full key reference.
 | `Ctrl-g` | generate a password into the form's password field |
 | `s` | sync with relays (report in the status bar) |
 | `t` | network mode overlay (clearnet / SOCKS5 / embedded Tor, relay check) |
+| `Ctrl-l` | lock the NSD login session (the next process start re-confirms) |
 | `?` | help overlay |
 | `q` | quit |
 
@@ -127,12 +129,21 @@ by a test, so NSD mode is fully NIP-44 interoperable. Every signature
 requires a physical button press; rejection and PIN-lock surface as
 explicit errors.
 
-**Login confirmation**: before opening the vault, shuki sends the NSD a
-throwaway signature challenge (a never-published NIP-42-style event), so a
-session requires an explicit button press on the device — a plugged-in NSD
-cannot be used to decrypt the vault silently. On by default in NSD mode;
-disable with `"device_auth_on_open": false` in the config (e.g. for
-scripting).
+**Login confirmation**: the first vault use of a session sends the NSD a
+throwaway signature challenge (a never-published NIP-42-style event) —
+like a login, it requires an explicit button press on the device, so a
+merely plugged-in NSD cannot be used to decrypt the vault silently. The
+confirmation then starts a **login session**: a small non-secret marker
+(`<data_dir>/.device_session`, just your npub + a timestamp) lets
+subsequent invocations skip the challenge until the session expires.
+Session lifetime is `device_auth_timeout_secs` in the config (default
+`900` = 15 minutes; `0` = require the button press on every invocation).
+End a session early with `shuki lock` (CLI) or `Ctrl-l` (TUI). Note that
+the session only covers *reading/opening* the vault: **event publishes
+(kind-30078 updates during sync) always require the on-device
+confirmation**, session or not. The whole mechanism is on by default in
+NSD mode; disable with `"device_auth_on_open": false` in the config
+(e.g. for scripting).
 
 ### Sync protocol
 

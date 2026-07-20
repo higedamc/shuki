@@ -11,6 +11,7 @@ use shuki::cli::{self, AppContext, Cli};
 use shuki::clipboard::Clipboard;
 use shuki::config::{Config, SignerConfig};
 use shuki::signer::nsd::NsdSigner;
+use shuki::signer::session;
 use shuki::signer::software::SoftwareSigner;
 use shuki::signer::Signer;
 use shuki::store::fs::FsVaultStore;
@@ -49,16 +50,44 @@ async fn run(cli: Cli) -> shuki::Result<()> {
                 SignerConfig::Nsd { port } => {
                     let nsd = NsdSigner::connect(port.clone()).await?;
                     if config.device_auth_on_open {
-                        // Physical-presence login: a plugged-in device must
-                        // not silently decrypt the vault. Runs before the
-                        // TUI enters raw mode, so plain stderr is fine.
-                        eprintln!("shuki: confirm login on your signing device…");
-                        nsd.authenticate().await.map_err(|e| match e {
-                            shuki::ShukiError::DeviceRejected => shuki::ShukiError::Device(
-                                "login rejected on the signing device".into(),
-                            ),
-                            e => e,
-                        })?;
+                        // Physical-presence login with a session lifetime:
+                        // the first vault use requires a button press on the
+                        // device; a valid session marker (same npub, not
+                        // expired) skips the challenge until it times out or
+                        // `shuki lock` clears it. Publishing events still
+                        // always confirms on-device (`/sign-message`).
+                        let npub = nsd
+                            .public_key()
+                            .await?
+                            .to_bech32()
+                            .expect("npub bech32 is infallible");
+                        let data_dir = config.resolve_data_dir();
+                        let need = config.device_auth_timeout_secs == 0
+                            || !session::is_valid(
+                                &data_dir,
+                                &npub,
+                                config.device_auth_timeout_secs,
+                            );
+                        if need {
+                            // Runs before the TUI enters raw mode, so plain
+                            // stderr is fine.
+                            eprintln!("shuki: confirm login on your signing device…");
+                            nsd.authenticate().await.map_err(|e| match e {
+                                shuki::ShukiError::DeviceRejected => shuki::ShukiError::Device(
+                                    "login rejected on the signing device".into(),
+                                ),
+                                e => e,
+                            })?;
+                            if config.device_auth_timeout_secs > 0 {
+                                // Best effort: a marker write failure must not
+                                // abort a successfully confirmed login.
+                                if let Err(e) = session::record(&data_dir, &npub) {
+                                    tracing::warn!("failed to record device session: {e}");
+                                }
+                            }
+                        } else {
+                            tracing::debug!("device session valid; skipping login challenge");
+                        }
                     }
                     Arc::new(nsd)
                 }

@@ -4,6 +4,7 @@
 
 pub mod keysetup;
 pub mod nsd;
+pub mod session;
 pub mod software;
 
 use async_trait::async_trait;

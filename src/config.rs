@@ -12,6 +12,7 @@ use crate::error::{Result, ShukiError};
 
 pub const DEFAULT_SOCKS5_ADDR: &str = "127.0.0.1:9050";
 pub const DEFAULT_CLIPBOARD_CLEAR_SECS: u64 = 45;
+pub const DEFAULT_DEVICE_AUTH_TIMEOUT_SECS: u64 = 900;
 
 /// How relay connections reach the network.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,11 @@ pub struct Config {
     /// the vault (NSD only).
     #[serde(default = "default_device_auth_on_open")]
     pub device_auth_on_open: bool,
+    /// Device login session lifetime in seconds; 0 = require confirmation on
+    /// every invocation. Publishing events always requires on-device
+    /// confirmation regardless.
+    #[serde(default = "default_device_auth_timeout_secs")]
+    pub device_auth_timeout_secs: u64,
     /// Override the data directory (default: platform data dir + "shuki").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
@@ -61,6 +67,10 @@ fn default_device_auth_on_open() -> bool {
     true
 }
 
+fn default_device_auth_timeout_secs() -> u64 {
+    DEFAULT_DEVICE_AUTH_TIMEOUT_SECS
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -69,6 +79,7 @@ impl Default for Config {
             net: NetMode::default(),
             clipboard_clear_secs: DEFAULT_CLIPBOARD_CLEAR_SECS,
             device_auth_on_open: true,
+            device_auth_timeout_secs: DEFAULT_DEVICE_AUTH_TIMEOUT_SECS,
             data_dir: None,
         }
     }
@@ -213,9 +224,16 @@ mod tests {
         // A config file missing the field defaults to requiring device auth.
         assert!(nsd.device_auth_on_open);
         assert!(Config::default().device_auth_on_open);
+        // …and to the default session timeout (15 min).
+        assert_eq!(nsd.device_auth_timeout_secs, 900);
+        assert_eq!(Config::default().device_auth_timeout_secs, 900);
 
         let disabled: Config = serde_json::from_str(r#"{"device_auth_on_open":false}"#).unwrap();
         assert!(!disabled.device_auth_on_open);
+        assert_eq!(disabled.device_auth_timeout_secs, 900);
+
+        let per_use: Config = serde_json::from_str(r#"{"device_auth_timeout_secs":0}"#).unwrap();
+        assert_eq!(per_use.device_auth_timeout_secs, 0);
     }
 
     fn clear_env() {

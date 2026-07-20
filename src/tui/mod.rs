@@ -16,6 +16,7 @@ pub mod widgets;
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -100,6 +101,8 @@ pub enum TaskResult {
     NetModeSet(Result<()>, NetMode),
     /// Relay connectivity report: (relay url, error-or-None) per relay.
     NetChecked(Result<Vec<(String, Option<String>)>>),
+    /// Device login-session marker cleared (Ctrl-l).
+    SessionLocked(Result<()>),
 }
 
 /// Side effects requested by [`update`]; executed by [`Executor::spawn`].
@@ -117,6 +120,10 @@ pub enum Effect {
     SetNetMode(NetMode),
     /// Probe every configured relay via [`SyncApi::net_check`].
     NetCheck,
+    /// Clear the device login-session marker in this data dir
+    /// (spawn_blocking). The running process keeps its in-memory
+    /// conversation key — locking affects the next process start.
+    LockSession(PathBuf),
     Quit,
 }
 
@@ -455,6 +462,9 @@ fn apply_action(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.mode = Mode::Busy("syncing".into());
             vec![Effect::RunSync]
         }
+        Action::LockSession => {
+            vec![Effect::LockSession(state.config.resolve_data_dir())]
+        }
         Action::ToggleReveal => {
             if let Mode::Detail { reveal } = &mut state.mode {
                 *reveal = !*reveal;
@@ -779,6 +789,14 @@ fn apply_task(state: &mut AppState, result: TaskResult) -> Vec<Effect> {
             state.mode = Mode::Error(format!("net check: {e}"));
             Vec::new()
         }
+        TaskResult::SessionLocked(Ok(())) => {
+            state.status = "device session cleared (applies to next start)".into();
+            Vec::new()
+        }
+        TaskResult::SessionLocked(Err(e)) => {
+            state.mode = Mode::Error(format!("lock session: {e}"));
+            Vec::new()
+        }
     }
 }
 
@@ -859,6 +877,12 @@ async fn run_effect(
             TaskResult::NetModeSet(result, net)
         }
         Effect::NetCheck => TaskResult::NetChecked(sync.net_check().await),
+        Effect::LockSession(data_dir) => TaskResult::SessionLocked(
+            tokio::task::spawn_blocking(move || crate::signer::session::clear(&data_dir))
+                .await
+                .map_err(|e| ShukiError::Other(format!("lock session task: {e}")))
+                .and_then(|r| r),
+        ),
     }
 }
 
@@ -1605,6 +1629,54 @@ mod tests {
         assert!(matches!(state.mode, Mode::Browse));
     }
 
+    // ---- reducer: lock session ------------------------------------------
+
+    #[test]
+    fn ctrl_l_emits_lock_session_effect_and_reports_status() {
+        let mut state = state_with(&["b"]);
+        let effects = update(
+            &mut state,
+            AppMsg::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::LockSession(state.config.resolve_data_dir())]
+        );
+        // Browse keeps working while the (fast) task runs.
+        assert!(matches!(state.mode, Mode::Browse));
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::SessionLocked(Ok(()))),
+        );
+        assert_eq!(
+            state.status,
+            "device session cleared (applies to next start)"
+        );
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn lock_session_error_enters_error_mode() {
+        let mut state = state_with(&[]);
+        update(
+            &mut state,
+            AppMsg::TaskDone(TaskResult::SessionLocked(Err(ShukiError::Other(
+                "disk".into(),
+            )))),
+        );
+        let Mode::Error(msg) = &state.mode else {
+            panic!("expected error mode, got {:?}", state.mode);
+        };
+        assert!(msg.contains("lock session"));
+    }
+
+    #[test]
+    fn plain_l_still_expands_not_locks() {
+        let mut state = state_with(&["a/x"]);
+        let effects = press_char(&mut state, 'l');
+        assert!(effects.is_empty(), "plain l must not emit LockSession");
+    }
+
     #[test]
     fn tick_advances_spinner_only_while_busy() {
         let mut state = state_with(&[]);
@@ -1926,6 +1998,35 @@ mod tests {
         };
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], ("wss://r0.example".to_owned(), None));
+    }
+
+    #[tokio::test]
+    async fn lock_session_effect_removes_marker_file() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::signer::session::record(dir.path(), TEST_NPUB).unwrap();
+        assert!(crate::signer::session::is_valid(dir.path(), TEST_NPUB, 900));
+        let (executor, mut rx) =
+            executor_with(Arc::new(MockVault::default()), Arc::default()).await;
+        let result = run_one(
+            &executor,
+            &mut rx,
+            Effect::LockSession(dir.path().to_path_buf()),
+        )
+        .await;
+        assert!(matches!(result, TaskResult::SessionLocked(Ok(()))));
+        assert!(!crate::signer::session::is_valid(
+            dir.path(),
+            TEST_NPUB,
+            900
+        ));
+        // Idempotent: locking again without a marker still succeeds.
+        let result = run_one(
+            &executor,
+            &mut rx,
+            Effect::LockSession(dir.path().to_path_buf()),
+        )
+        .await;
+        assert!(matches!(result, TaskResult::SessionLocked(Ok(()))));
     }
 
     #[tokio::test]
