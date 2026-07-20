@@ -39,6 +39,15 @@ use crate::store::{CipherEntry, EntrySyncState, SyncState, VaultStore};
 /// clock skew between devices/relays cannot hide events.
 const SINCE_OVERLAP_SECS: u64 = 3600;
 
+/// Cap on kind-30078 events accepted from relays per fetch. Well-behaved
+/// relays keep only the latest event per (author, kind, d-tag) — this bound
+/// exists purely as defense-in-depth against a misbehaving/malicious relay
+/// replaying unbounded stale/duplicate/spam events under our own pubkey (it
+/// cannot forge new ones: `nostr-relay-pool` verifies event signatures
+/// before handing events to us, and NIP-44's MAC means anything it forges
+/// content-wise fails to decrypt). Generous enough for very large vaults.
+const MAX_FETCH_EVENTS: usize = 20_000;
+
 /// One decrypted kind-30078 event authored by us.
 #[derive(Clone, Debug)]
 pub struct RemoteEntry {
@@ -310,7 +319,8 @@ impl SyncEngine {
     ) -> Result<(Vec<RemoteEntry>, BTreeMap<String, String>)> {
         let mut filter = Filter::new()
             .author(*own_pk)
-            .kind(Kind::ApplicationSpecificData);
+            .kind(Kind::ApplicationSpecificData)
+            .limit(MAX_FETCH_EVENTS);
         if let Some(ts) = since {
             filter = filter.since(Timestamp::from(ts.saturating_sub(SINCE_OVERLAP_SECS)));
         }
@@ -318,6 +328,15 @@ impl SyncEngine {
             .fetch_events(filter, relays::FETCH_TIMEOUT)
             .await
             .map_err(|e| ShukiError::Relay(format!("fetch events: {e}")))?;
+        if events.len() >= MAX_FETCH_EVENTS {
+            report.errors.push((
+                "fetch".to_owned(),
+                format!(
+                    "hit the {MAX_FETCH_EVENTS}-event fetch cap; some remote history may not \
+                     have been considered this run (a relay may be replaying stale events)"
+                ),
+            ));
+        }
 
         let mut entries = Vec::new();
         let mut contents = BTreeMap::new();

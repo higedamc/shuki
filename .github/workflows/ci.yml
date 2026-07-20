@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: this workflow only reads the repo and calls the GitHub
+# API for gitleaks' PR annotations — it never needs to write.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -60,8 +65,8 @@ jobs:
       - name: cargo audit (default features)
         run: |
           cargo install cargo-audit --locked
-          # The lockfile union includes tor-only deps (arti pulls ring 0.16 /
-          # rsa); the default build graph is what ships. Known tor-feature
-          # advisories are tracked in audit.toml.
+          # .cargo/audit.toml already scopes the accepted tor-feature-only
+          # advisories (arti pulls ring 0.16 / rsa; not in the default build
+          # graph). A genuinely new advisory must fail this job, not be
+          # silently masked — no continue-on-error here.
           cargo audit
-        continue-on-error: true
