@@ -51,6 +51,12 @@ shuki edit web/example.com     # field-by-field re-prompt (no $EDITOR tempfiles)
 
 shuki sync                     # push dirty entries + pull remote changes
 shuki restore                  # disaster recovery: rebuild vault from relays
+shuki net show                 # current network mode + relay list
+shuki net tor                  # route via an external Tor daemon (127.0.0.1:9050)
+shuki net socks5 HOST:PORT     # …or any custom SOCKS5 proxy
+shuki net embedded             # …or embedded arti (needs a --features tor build)
+shuki net clearnet             # back to direct connections
+shuki net test                 # per-relay ✓/✗ through the current mode
 shuki key export               # print NIP-49 ncryptsec cold backup
 shuki whoami                   # identity, signer backend, config/data paths
 shuki                          # no args → TUI
@@ -73,6 +79,7 @@ in the header. Press `?` for the full key reference.
 | `m` | move / rename the selected entry |
 | `Ctrl-g` | generate a password into the form's password field |
 | `s` | sync with relays (report in the status bar) |
+| `t` | network mode overlay (clearnet / SOCKS5 / embedded Tor, relay check) |
 | `?` | help overlay |
 | `q` | quit |
 
@@ -159,6 +166,15 @@ content: NIP-44( {"app":"shuki","v":1,"path":…,"fields":{…},
 works with a system Tor/Start9/Whonix-style setup), or `tor` — an
 embedded [arti](https://gitlab.torproject.org/tpo/core/arti) client when
 built with `cargo build --features tor`.
+
+Mode switching is built into both interfaces: `shuki net
+tor|socks5|embedded|clearnet` from the CLI, or the `t` overlay in the TUI
+(the header always shows the active mode, e.g. `[socks5:9050]`). `shuki net
+test` — or `c` inside the overlay — connects to every configured relay
+through the current mode and reports per-relay ✓/✗, so you can verify your
+Tor path before syncing. Selecting embedded Tor in a binary built without
+`--features tor` still saves the config but warns that sync will error
+until you rebuild.
 
 ## Threat model
 

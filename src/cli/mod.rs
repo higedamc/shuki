@@ -1,8 +1,9 @@
 //! CLI surface (owned by `leaf/cli-commands-all`).
 //!
 //! Commands: init, ls, show [-c], insert, generate, edit, rm, mv, find,
-//! sync, restore, relay add/rm/ls, key export/import, whoami. No args → TUI
-//! (dispatched by `main.rs` in the integration phase).
+//! sync, restore, relay add/rm/ls, net show/clearnet/tor/socks5/embedded/test,
+//! key export/import, whoami. No args → TUI (dispatched by `main.rs` in the
+//! integration phase).
 //!
 //! # `main.rs` integration
 //!
@@ -133,6 +134,11 @@ pub enum Command {
         #[command(subcommand)]
         cmd: RelayCmd,
     },
+    /// Show or switch the network mode (clearnet / Tor) and test relays
+    Net {
+        #[command(subcommand)]
+        cmd: NetCmd,
+    },
     /// Export/import the signing key
     Key {
         #[command(subcommand)]
@@ -150,6 +156,25 @@ pub enum RelayCmd {
     Rm { url: String },
     /// List configured relays
     Ls,
+}
+
+#[derive(Subcommand)]
+pub enum NetCmd {
+    /// Show the current mode, embedded-tor build support, and relay list
+    Show,
+    /// Connect directly (no proxy)
+    Clearnet,
+    /// Route through an external Tor daemon (SOCKS5 at 127.0.0.1:9050)
+    Tor,
+    /// Route through a custom SOCKS5 proxy
+    Socks5 {
+        /// Proxy address as host:port, e.g. 127.0.0.1:9150
+        addr: String,
+    },
+    /// Use the embedded Tor client (requires a `--features tor` build)
+    Embedded,
+    /// Try to connect to every configured relay through the current mode
+    Test,
 }
 
 #[derive(Subcommand)]
@@ -174,14 +199,18 @@ pub struct AppContext {
 }
 
 /// Whether `main.rs` must build an [`AppContext`] (vault + signer + sync)
-/// before dispatching. `false` for Init / Key / Relay / Whoami, which only
-/// touch the [`Config`] and the keychain (whoami additionally probes an NSD
-/// device, degrading gracefully) — route those through
-/// [`dispatch_standalone`].
+/// before dispatching. `false` for Init / Key / Relay / Net / Whoami, which
+/// only touch the [`Config`] and the keychain (whoami additionally probes an
+/// NSD device, and `net test` opens relay connections — but neither needs a
+/// vault or signer) — route those through [`dispatch_standalone`].
 pub fn needs_vault(cmd: &Command) -> bool {
     !matches!(
         cmd,
-        Command::Init { .. } | Command::Key { .. } | Command::Relay { .. } | Command::Whoami
+        Command::Init { .. }
+            | Command::Key { .. }
+            | Command::Relay { .. }
+            | Command::Net { .. }
+            | Command::Whoami
     )
 }
 
@@ -212,9 +241,11 @@ pub async fn dispatch_standalone(cmd: Command, config: &mut Config) -> Result<()
 
 async fn dispatch_with(cmd: Command, ctx: &mut AppContext, ui: &mut Ui<'_>) -> Result<()> {
     match cmd {
-        Command::Init { .. } | Command::Relay { .. } | Command::Key { .. } | Command::Whoami => {
-            dispatch_standalone_with(cmd, &mut ctx.config, ui).await
-        }
+        Command::Init { .. }
+        | Command::Relay { .. }
+        | Command::Net { .. }
+        | Command::Key { .. }
+        | Command::Whoami => dispatch_standalone_with(cmd, &mut ctx.config, ui).await,
         Command::Sync => commands::sync_cmd::sync(ctx, ui).await,
         Command::Restore { yes } => commands::sync_cmd::restore(ctx, ui, yes).await,
         cmd => {
@@ -277,6 +308,14 @@ async fn dispatch_standalone_with(
             RelayCmd::Add { url } => commands::sync_cmd::relay_add(config, ui, &url),
             RelayCmd::Rm { url } => commands::sync_cmd::relay_rm(config, ui, &url),
             RelayCmd::Ls => commands::sync_cmd::relay_ls(config, ui),
+        },
+        Command::Net { cmd } => match cmd {
+            NetCmd::Show => commands::net_cmd::show(config, ui),
+            NetCmd::Clearnet => commands::net_cmd::set_clearnet(config, ui),
+            NetCmd::Tor => commands::net_cmd::set_tor(config, ui),
+            NetCmd::Socks5 { addr } => commands::net_cmd::set_socks5(config, ui, &addr),
+            NetCmd::Embedded => commands::net_cmd::set_embedded(config, ui),
+            NetCmd::Test => commands::net_cmd::test(config, ui).await,
         },
         Command::Key { cmd } => match cmd {
             KeyCmd::Export => commands::key_cmd::export(ui).await,

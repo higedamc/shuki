@@ -38,6 +38,18 @@ pub enum Action {
     FormGeneratePassword,
     OpenHelp,
     CloseHelp,
+    /// `t` in browse: open the network-mode overlay.
+    OpenNetwork,
+    NetSelectUp,
+    NetSelectDown,
+    /// Typed character for the socks5 address field (socks5 row selected).
+    NetInput(char),
+    NetBackspace,
+    /// Enter in the overlay: apply the selected mode.
+    NetApply,
+    /// `c` in the overlay: check relay connectivity through the current mode.
+    NetCheck,
+    NetClose,
     StartRename,
     RenameInput(char),
     RenameBackspace,
@@ -81,6 +93,7 @@ pub fn action_for(mode: &Mode, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('e') => Some(Action::StartEdit),
             KeyCode::Char('d') => Some(Action::StartDelete),
             KeyCode::Char('s') => Some(Action::StartSync),
+            KeyCode::Char('t') => Some(Action::OpenNetwork),
             KeyCode::Char('m') => Some(Action::StartRename),
             KeyCode::Char('?') => Some(Action::OpenHelp),
             KeyCode::Char('q') => Some(Action::Quit),
@@ -112,6 +125,21 @@ pub fn action_for(mode: &Mode, key: KeyEvent) -> Option<Action> {
                 KeyCode::Esc => Some(Action::FormCancel),
                 KeyCode::Backspace => Some(Action::FormBackspace),
                 _ => text_char(key).map(Action::FormInput),
+            }
+        }
+        Mode::Network(net) => {
+            // On the socks5 row printable characters edit the proxy address
+            // (so `c` types into it); elsewhere `c` runs the relay check.
+            let editing = net.choice == crate::tui::widgets::NetChoice::Socks5;
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::NetSelectDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::NetSelectUp),
+                KeyCode::Enter => Some(Action::NetApply),
+                KeyCode::Esc => Some(Action::NetClose),
+                KeyCode::Backspace if editing => Some(Action::NetBackspace),
+                KeyCode::Char('c') if !editing => Some(Action::NetCheck),
+                _ if editing => text_char(key).map(Action::NetInput),
+                _ => None,
             }
         }
         Mode::Rename(_) => match key.code {
@@ -180,6 +208,7 @@ mod tests {
                 (key(KeyCode::Char('e')), Some(Action::StartEdit)),
                 (key(KeyCode::Char('d')), Some(Action::StartDelete)),
                 (key(KeyCode::Char('s')), Some(Action::StartSync)),
+                (key(KeyCode::Char('t')), Some(Action::OpenNetwork)),
                 (key(KeyCode::Char('m')), Some(Action::StartRename)),
                 (key(KeyCode::Char('?')), Some(Action::OpenHelp)),
                 (key(KeyCode::Char('q')), Some(Action::Quit)),
@@ -269,6 +298,56 @@ mod tests {
     }
 
     #[test]
+    fn network_keymap_non_socks5_row_runs_check() {
+        use crate::config::NetMode;
+        use crate::tui::widgets::NetworkState;
+
+        let mode = Mode::Network(NetworkState::new(&NetMode::Clearnet));
+        check(
+            &mode,
+            &[
+                (key(KeyCode::Char('j')), Some(Action::NetSelectDown)),
+                (key(KeyCode::Down), Some(Action::NetSelectDown)),
+                (key(KeyCode::Char('k')), Some(Action::NetSelectUp)),
+                (key(KeyCode::Up), Some(Action::NetSelectUp)),
+                (key(KeyCode::Enter), Some(Action::NetApply)),
+                (key(KeyCode::Esc), Some(Action::NetClose)),
+                (key(KeyCode::Char('c')), Some(Action::NetCheck)),
+                // Not editing → plain characters and backspace are ignored.
+                (key(KeyCode::Char('x')), None),
+                (key(KeyCode::Backspace), None),
+                (key(KeyCode::Tab), None),
+            ],
+        );
+    }
+
+    #[test]
+    fn network_keymap_socks5_row_edits_addr() {
+        use crate::config::NetMode;
+        use crate::tui::widgets::NetworkState;
+
+        let mode = Mode::Network(NetworkState::new(&NetMode::Socks5 {
+            addr: "127.0.0.1:9050".into(),
+        }));
+        check(
+            &mode,
+            &[
+                (key(KeyCode::Char('1')), Some(Action::NetInput('1'))),
+                (key(KeyCode::Char(':')), Some(Action::NetInput(':'))),
+                // `c` types into the address instead of running the check.
+                (key(KeyCode::Char('c')), Some(Action::NetInput('c'))),
+                (key(KeyCode::Backspace), Some(Action::NetBackspace)),
+                // Navigation and apply/close still work.
+                (key(KeyCode::Char('j')), Some(Action::NetSelectDown)),
+                (key(KeyCode::Char('k')), Some(Action::NetSelectUp)),
+                (key(KeyCode::Enter), Some(Action::NetApply)),
+                (key(KeyCode::Esc), Some(Action::NetClose)),
+                (ctrl('x'), None),
+            ],
+        );
+    }
+
+    #[test]
     fn help_keymap_any_key_closes() {
         let mode = Mode::Help(Box::new(Mode::Browse));
         for k in [
@@ -338,6 +417,9 @@ mod tests {
                 VaultPath::parse("a").unwrap(),
             )),
             Mode::Help(Box::new(Mode::Browse)),
+            Mode::Network(crate::tui::widgets::NetworkState::new(
+                &crate::config::NetMode::Clearnet,
+            )),
             Mode::Busy("b".into()),
             Mode::Error("e".into()),
         ];

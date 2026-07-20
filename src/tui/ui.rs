@@ -72,21 +72,23 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     match &state.mode {
         Mode::Help(_) => draw_help_overlay(frame, main, state),
         Mode::Rename(rename) => widgets::render_rename(frame, main, rename),
+        Mode::Network(net) => widgets::render_network(frame, main, net),
         _ => {}
     }
 }
 
-/// Header line: app name left, shortened npub + signer backend right.
-/// Visible in every mode.
+/// Header line: app name left; shortened npub + signer backend + network
+/// mode tag right. Visible in every mode.
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(
         Paragraph::new("shuki").style(Style::default().add_modifier(Modifier::BOLD)),
         area,
     );
     let id = format!(
-        "{} ({})",
+        "{} ({}) [{}]",
         shorten_npub(&state.identity.npub),
-        state.identity.signer_label
+        state.identity.signer_label,
+        super::net_tag(&state.config.net)
     );
     frame.render_widget(Paragraph::new(id).alignment(Alignment::Right), area);
 }
@@ -110,21 +112,23 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
         Line::raw("  y        copy        a        add entry"),
         Line::raw("  e        edit entry  m        rename / move entry"),
         Line::raw("  d        delete      s        sync"),
-        Line::raw("  ?        help        q        quit"),
+        Line::raw("  t        network mode   ?  help   q  quit"),
         Line::raw("detail"),
         Line::raw("  r reveal/hide   y copy   m rename   ?  help   Esc back"),
         Line::raw("search"),
         Line::raw("  type to filter   Enter accept   Esc cancel"),
         Line::raw("add / edit form"),
-        Line::raw("  Tab/Shift-Tab field   Ctrl-g generate password"),
-        Line::raw("  Enter save   Esc cancel"),
+        Line::raw("  Tab/Shift-Tab field   Ctrl-g generate password   Enter save   Esc cancel"),
         Line::raw("rename"),
         Line::raw("  Enter rename   Esc cancel"),
+        Line::raw("network mode"),
+        Line::raw("  j/k select   Enter apply   c check relays   Esc close"),
         Line::raw("confirm delete"),
         Line::raw("  y delete   n/Esc cancel"),
         Line::raw(""),
         Line::raw(format!("identity: {}", state.identity.npub)),
         Line::raw(format!("signer:   {}", state.identity.signer_label)),
+        Line::raw(format!("network:  {}", super::net_tag(&state.config.net))),
         Line::raw(format!("relays:   {} configured", state.relay_count)),
         Line::raw(""),
         Line::raw("press any key to close"),
@@ -152,6 +156,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::raw("m        rename entry"),
         Line::raw("d        delete entry"),
         Line::raw("s        sync"),
+        Line::raw("t        network mode"),
         Line::raw("?        help"),
         Line::raw("q        quit"),
     ];
@@ -207,6 +212,7 @@ fn draw_status(frame: &mut Frame, area: Rect, state: &AppState) {
         }
         Mode::ConfirmDelete(_) => "[delete?]".to_owned(),
         Mode::Rename(_) => "[rename]".to_owned(),
+        Mode::Network(_) => "[network]".to_owned(),
         Mode::Help(_) => "[help]".to_owned(),
         Mode::Busy(label) => {
             let spin = SPINNER[state.spinner_frame % SPINNER.len()];
@@ -247,7 +253,11 @@ mod tests {
     }
 
     fn state_with(paths: &[&str]) -> AppState {
-        let mut state = AppState::new(crate::tui::test_identity(), 2, true, 45);
+        let mut state = AppState::new(
+            crate::tui::test_identity(),
+            crate::tui::test_config(2),
+            true,
+        );
         let paths: Vec<VaultPath> = paths.iter().map(|p| VaultPath::parse(p).unwrap()).collect();
         update(&mut state, AppMsg::TaskDone(TaskResult::Entries(Ok(paths))));
         state
@@ -348,7 +358,79 @@ mod tests {
             let text = render(&mut state);
             assert!(text.contains(&short), "npub missing in header:\n{text}");
             assert!(text.contains("(software)"), "signer label missing:\n{text}");
+            assert!(text.contains("[clearnet]"), "net tag missing:\n{text}");
         }
+    }
+
+    #[test]
+    fn header_net_tag_tracks_config() {
+        let mut state = state_with(&[]);
+        state.config.net = crate::config::NetMode::Socks5 {
+            addr: "127.0.0.1:9050".into(),
+        };
+        let text = render(&mut state);
+        assert!(
+            text.contains("[socks5:9050]"),
+            "socks5 tag missing:\n{text}"
+        );
+        state.config.net = crate::config::NetMode::Tor;
+        let text = render(&mut state);
+        assert!(text.contains("[tor(embedded)]"), "tor tag missing:\n{text}");
+    }
+
+    #[test]
+    fn network_overlay_lists_modes_addr_and_results() {
+        let mut state = state_with(&[]);
+        let mut net = crate::tui::NetworkState::new(&crate::config::NetMode::Clearnet);
+        state.mode = Mode::Network(net);
+        let text = render(&mut state);
+        assert!(text.contains("network mode"), "title missing:\n{text}");
+        assert!(text.contains("clearnet"), "clearnet row missing:\n{text}");
+        assert!(
+            text.contains("socks5 proxy: 127.0.0.1:9050"),
+            "socks5 row (default addr) missing:\n{text}"
+        );
+        assert!(
+            text.contains("embedded tor"),
+            "embedded row missing:\n{text}"
+        );
+        if !cfg!(feature = "tor") {
+            assert!(
+                text.contains("requires --features tor build"),
+                "feature hint missing:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("c: check relays"),
+            "key hint missing:\n{text}"
+        );
+
+        // Results render inside the overlay.
+        net = crate::tui::NetworkState::new(&crate::config::NetMode::Clearnet);
+        net.results = Some(vec![
+            ("wss://r0.example".into(), None),
+            ("wss://r1.example".into(), Some("Disconnected".into())),
+        ]);
+        state.mode = Mode::Network(net);
+        let text = render(&mut state);
+        assert!(
+            text.contains("✓ wss://r0.example"),
+            "ok relay missing:\n{text}"
+        );
+        assert!(
+            text.contains("✗ wss://r1.example: Disconnected"),
+            "failed relay missing:\n{text}"
+        );
+
+        // While checking, a progress note is shown.
+        let mut net = crate::tui::NetworkState::new(&crate::config::NetMode::Clearnet);
+        net.checking = true;
+        state.mode = Mode::Network(net);
+        let text = render(&mut state);
+        assert!(
+            text.contains("checking relays…"),
+            "progress missing:\n{text}"
+        );
     }
 
     #[test]
@@ -369,9 +451,12 @@ mod tests {
             "help",
             "rename / move entry",
             "Ctrl-g generate password",
+            "t        network mode",
+            "c check relays",
             "press any key to close",
             crate::tui::TEST_NPUB, // full npub, not shortened
             "signer:   software",
+            "network:  clearnet",
             "relays:   2 configured",
         ] {
             assert!(text.contains(needle), "missing {needle:?}:\n{text}");
