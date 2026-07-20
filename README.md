@@ -120,6 +120,13 @@ by a test, so NSD mode is fully NIP-44 interoperable. Every signature
 requires a physical button press; rejection and PIN-lock surface as
 explicit errors.
 
+**Login confirmation**: before opening the vault, shuki sends the NSD a
+throwaway signature challenge (a never-published NIP-42-style event), so a
+session requires an explicit button press on the device — a plugged-in NSD
+cannot be used to decrypt the vault silently. On by default in NSD mode;
+disable with `"device_auth_on_open": false` in the config (e.g. for
+scripting).
+
 ### Sync protocol
 
 Each entry is one **parameterized replaceable event**:
