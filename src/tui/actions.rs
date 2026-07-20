@@ -24,6 +24,9 @@ pub enum Action {
     StartEdit,
     StartDelete,
     StartSync,
+    /// Ctrl-l in browse: clear the device login-session marker (the next
+    /// process start re-requires on-device confirmation).
+    LockSession,
     ToggleReveal,
     ConfirmYes,
     ConfirmNo,
@@ -81,25 +84,32 @@ pub fn action_for(mode: &Mode, key: KeyEvent) -> Option<Action> {
         return Some(Action::Quit);
     }
     match mode {
-        Mode::Browse => match key.code {
-            KeyCode::Char('j') | KeyCode::Down => Some(Action::NavDown),
-            KeyCode::Char('k') | KeyCode::Up => Some(Action::NavUp),
-            KeyCode::Char('h') | KeyCode::Left => Some(Action::Collapse),
-            KeyCode::Char('l') | KeyCode::Right => Some(Action::Expand),
-            KeyCode::Enter => Some(Action::OpenDetail),
-            KeyCode::Char('/') => Some(Action::StartSearch),
-            KeyCode::Char('y') => Some(Action::CopyPassword),
-            KeyCode::Char('a') => Some(Action::StartAdd),
-            KeyCode::Char('e') => Some(Action::StartEdit),
-            KeyCode::Char('d') => Some(Action::StartDelete),
-            KeyCode::Char('s') => Some(Action::StartSync),
-            KeyCode::Char('t') => Some(Action::OpenNetwork),
-            KeyCode::Char('m') => Some(Action::StartRename),
-            KeyCode::Char('?') => Some(Action::OpenHelp),
-            KeyCode::Char('q') => Some(Action::Quit),
-            KeyCode::Esc => Some(Action::Back),
-            _ => None,
-        },
+        Mode::Browse => {
+            // Ctrl-l locks the device session; must run before the plain
+            // `l` (expand) arm below, which matches on the key code alone.
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+                return Some(Action::LockSession);
+            }
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::NavDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::NavUp),
+                KeyCode::Char('h') | KeyCode::Left => Some(Action::Collapse),
+                KeyCode::Char('l') | KeyCode::Right => Some(Action::Expand),
+                KeyCode::Enter => Some(Action::OpenDetail),
+                KeyCode::Char('/') => Some(Action::StartSearch),
+                KeyCode::Char('y') => Some(Action::CopyPassword),
+                KeyCode::Char('a') => Some(Action::StartAdd),
+                KeyCode::Char('e') => Some(Action::StartEdit),
+                KeyCode::Char('d') => Some(Action::StartDelete),
+                KeyCode::Char('s') => Some(Action::StartSync),
+                KeyCode::Char('t') => Some(Action::OpenNetwork),
+                KeyCode::Char('m') => Some(Action::StartRename),
+                KeyCode::Char('?') => Some(Action::OpenHelp),
+                KeyCode::Char('q') => Some(Action::Quit),
+                KeyCode::Esc => Some(Action::Back),
+                _ => None,
+            }
+        }
         Mode::Search(_) => match key.code {
             KeyCode::Enter => Some(Action::SearchAccept),
             KeyCode::Esc => Some(Action::SearchCancel),
@@ -213,6 +223,8 @@ mod tests {
                 (key(KeyCode::Char('?')), Some(Action::OpenHelp)),
                 (key(KeyCode::Char('q')), Some(Action::Quit)),
                 (key(KeyCode::Esc), Some(Action::Back)),
+                // Ctrl-l locks the session; plain `l` still expands.
+                (ctrl('l'), Some(Action::LockSession)),
                 (key(KeyCode::Char('x')), None),
                 (key(KeyCode::Tab), None),
                 (key(KeyCode::Backspace), None),

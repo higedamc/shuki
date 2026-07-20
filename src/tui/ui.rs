@@ -112,7 +112,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
         Line::raw("  y        copy        a        add entry"),
         Line::raw("  e        edit entry  m        rename / move entry"),
         Line::raw("  d        delete      s        sync"),
-        Line::raw("  t        network mode   ?  help   q  quit"),
+        Line::raw("  t        network mode   Ctrl-l  lock device session   ?  help   q  quit"),
         Line::raw("detail"),
         Line::raw("  r reveal/hide   y copy   m rename   ?  help   Esc back"),
         Line::raw("search"),
@@ -157,6 +157,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::raw("d        delete entry"),
         Line::raw("s        sync"),
         Line::raw("t        network mode"),
+        Line::raw("Ctrl-l   lock session"),
         Line::raw("?        help"),
         Line::raw("q        quit"),
     ];
@@ -452,6 +453,7 @@ mod tests {
             "rename / move entry",
             "Ctrl-g generate password",
             "t        network mode",
+            "Ctrl-l  lock device session",
             "c check relays",
             "press any key to close",
             crate::tui::TEST_NPUB, // full npub, not shortened

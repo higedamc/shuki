@@ -259,6 +259,7 @@ fn needs_vault_matrix() {
     assert!(!needs_vault(&Command::Net { cmd: NetCmd::Tor }));
     assert!(!needs_vault(&Command::Net { cmd: NetCmd::Test }));
     assert!(!needs_vault(&Command::Whoami));
+    assert!(!needs_vault(&Command::Lock));
     assert!(needs_vault(&Command::Sync));
     assert!(needs_vault(&Command::Restore { yes: true }));
     assert!(needs_vault(&Command::Ls { path: None }));
@@ -285,6 +286,8 @@ fn parses_pass_like_invocations() {
     }
     let cli = Cli::try_parse_from(["shuki", "whoami"]).unwrap();
     assert!(matches!(cli.command, Some(Command::Whoami)));
+    let cli = Cli::try_parse_from(["shuki", "lock"]).unwrap();
+    assert!(matches!(cli.command, Some(Command::Lock)));
     let cli = Cli::try_parse_from(["shuki", "net", "socks5", "127.0.0.1:9150"]).unwrap();
     match cli.command {
         Some(Command::Net {
@@ -988,6 +991,73 @@ fn whoami_formatting_covers_unavailable_and_signer_labels() {
         signer_label(&SignerConfig::Software),
         "software (OS keychain)"
     );
+}
+
+// ----------------------------------------------------------------- lock
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn lock_removes_session_marker_and_reports() {
+    use crate::signer::session;
+
+    let _g = crate::config::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SHUKI_CONFIG", dir.path().join("config.json"));
+    std::env::set_var("SHUKI_DATA_DIR", dir.path().join("data"));
+    let mut config = Config {
+        signer: crate::config::SignerConfig::Nsd { port: None },
+        ..Config::default()
+    };
+    let data_dir = config.resolve_data_dir();
+    session::record(&data_dir, "npub1test").unwrap();
+    assert!(session::is_valid(&data_dir, "npub1test", 900));
+
+    let mut p = StubPrompter::default();
+    let (res, out) = run_standalone_capture(Command::Lock, &mut config, &mut p).await;
+    res.unwrap();
+    assert!(
+        out.contains("device session cleared — next use requires confirmation on the device"),
+        "got: {out}"
+    );
+    // NSD mode: no software-signer note.
+    assert!(!out.contains("note:"), "got: {out}");
+    assert!(!session::is_valid(&data_dir, "npub1test", 900));
+
+    // Idempotent: locking again (no marker) still succeeds.
+    let (res, out) = run_standalone_capture(Command::Lock, &mut config, &mut p).await;
+    res.unwrap();
+    assert!(out.contains("device session cleared"), "got: {out}");
+
+    std::env::remove_var("SHUKI_CONFIG");
+    std::env::remove_var("SHUKI_DATA_DIR");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn lock_in_software_mode_notes_and_still_clears() {
+    use crate::signer::session;
+
+    let _g = crate::config::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SHUKI_CONFIG", dir.path().join("config.json"));
+    std::env::set_var("SHUKI_DATA_DIR", dir.path().join("data"));
+    let mut config = Config::default(); // software signer
+    let data_dir = config.resolve_data_dir();
+    // Leftover marker from a previous NSD setup.
+    session::record(&data_dir, "npub1old").unwrap();
+
+    let mut p = StubPrompter::default();
+    let (res, out) = run_standalone_capture(Command::Lock, &mut config, &mut p).await;
+    res.unwrap();
+    assert!(
+        out.contains("note: the software signer has no device session"),
+        "got: {out}"
+    );
+    assert!(out.contains("device session cleared"), "got: {out}");
+    assert!(!session::is_valid(&data_dir, "npub1old", 900));
+
+    std::env::remove_var("SHUKI_CONFIG");
+    std::env::remove_var("SHUKI_DATA_DIR");
 }
 
 // ------------------------------------------------------------- generate

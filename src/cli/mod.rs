@@ -146,6 +146,9 @@ pub enum Command {
     },
     /// Show the logged-in identity (npub, signer backend, config, relays)
     Whoami,
+    /// End the device login session — the next vault use requires a fresh
+    /// confirmation on the signing device (NSD)
+    Lock,
 }
 
 #[derive(Subcommand)]
@@ -199,10 +202,11 @@ pub struct AppContext {
 }
 
 /// Whether `main.rs` must build an [`AppContext`] (vault + signer + sync)
-/// before dispatching. `false` for Init / Key / Relay / Net / Whoami, which
-/// only touch the [`Config`] and the keychain (whoami additionally probes an
-/// NSD device, and `net test` opens relay connections — but neither needs a
-/// vault or signer) — route those through [`dispatch_standalone`].
+/// before dispatching. `false` for Init / Key / Relay / Net / Whoami / Lock,
+/// which only touch the [`Config`] and the keychain (whoami additionally
+/// probes an NSD device, and `net test` opens relay connections — but
+/// neither needs a vault or signer; lock only removes the session marker) —
+/// route those through [`dispatch_standalone`].
 pub fn needs_vault(cmd: &Command) -> bool {
     !matches!(
         cmd,
@@ -211,6 +215,7 @@ pub fn needs_vault(cmd: &Command) -> bool {
             | Command::Relay { .. }
             | Command::Net { .. }
             | Command::Whoami
+            | Command::Lock
     )
 }
 
@@ -245,7 +250,8 @@ async fn dispatch_with(cmd: Command, ctx: &mut AppContext, ui: &mut Ui<'_>) -> R
         | Command::Relay { .. }
         | Command::Net { .. }
         | Command::Key { .. }
-        | Command::Whoami => dispatch_standalone_with(cmd, &mut ctx.config, ui).await,
+        | Command::Whoami
+        | Command::Lock => dispatch_standalone_with(cmd, &mut ctx.config, ui).await,
         Command::Sync => commands::sync_cmd::sync(ctx, ui).await,
         Command::Restore { yes } => commands::sync_cmd::restore(ctx, ui, yes).await,
         cmd => {
@@ -322,6 +328,7 @@ async fn dispatch_standalone_with(
             KeyCmd::Import { value } => commands::key_cmd::import(ui, value).await,
         },
         Command::Whoami => commands::whoami::run(config, ui).await,
+        Command::Lock => commands::lock::run(config, ui),
         _ => Err(ShukiError::Other(
             "internal: this command needs a vault; route it through `dispatch`".into(),
         )),
