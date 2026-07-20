@@ -247,6 +247,7 @@ fn needs_vault_matrix() {
         cmd: KeyCmd::Export
     }));
     assert!(!needs_vault(&Command::Relay { cmd: RelayCmd::Ls }));
+    assert!(!needs_vault(&Command::Whoami));
     assert!(needs_vault(&Command::Sync));
     assert!(needs_vault(&Command::Restore { yes: true }));
     assert!(needs_vault(&Command::Ls { path: None }));
@@ -271,6 +272,8 @@ fn parses_pass_like_invocations() {
         Some(Command::Generate { length, .. }) => assert_eq!(length, 24),
         _ => panic!("wrong parse"),
     }
+    let cli = Cli::try_parse_from(["shuki", "whoami"]).unwrap();
+    assert!(matches!(cli.command, Some(Command::Whoami)));
     let cli = Cli::try_parse_from(["shuki"]).unwrap();
     assert!(cli.command.is_none());
     assert!(Cli::try_parse_from(["shuki", "init", "--nsd", "--import-nsec"]).is_err());
@@ -314,6 +317,15 @@ async fn ls_subtree_and_missing() {
     )
     .await;
     assert!(matches!(res, Err(ShukiError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn ls_empty_vault_prints_hint() {
+    let mut ctx = ctx_with(MockVault::default());
+    let mut p = StubPrompter::default();
+    let (res, out) = run_capture(Command::Ls { path: None }, &mut ctx, &mut p).await;
+    res.unwrap();
+    assert_eq!(out, "vault is empty — try: shuki generate <path>\n");
 }
 
 #[tokio::test]
@@ -754,6 +766,75 @@ fn format_report_lists_errors_only_when_present() {
     let s = commands::sync_cmd::format_report(&with_errors);
     assert!(s.contains("1 error(s):"));
     assert!(s.contains("  d: boom"));
+}
+
+// --------------------------------------------------------------- whoami
+
+#[tokio::test]
+async fn whoami_software_not_initialized_prints_hint() {
+    let (_guard, _store) = crate::signer::software::test_support::fresh_store().await;
+    let mut config = Config::default();
+    let mut p = StubPrompter::default();
+    let (res, out) = run_standalone_capture(Command::Whoami, &mut config, &mut p).await;
+    res.unwrap();
+    assert!(out.contains("not initialized"), "got: {out}");
+    assert!(out.contains("shuki init"), "got: {out}");
+    assert!(out.contains("signer: software (OS keychain)"));
+    assert!(out.contains("relays: 0 configured"));
+    assert!(out.contains("config: "));
+    assert!(out.contains("data:   "));
+    assert!(!out.contains("pubkey:"));
+}
+
+#[tokio::test]
+async fn whoami_software_prints_npub_and_hex_pubkey() {
+    use nostr::ToBech32 as _;
+
+    let (_guard, _store) = crate::signer::software::test_support::fresh_store().await;
+    let pk = crate::signer::keysetup::generate_and_store().await.unwrap();
+    let mut config = Config {
+        relays: vec!["wss://r.example".into()],
+        ..Config::default()
+    };
+    let mut p = StubPrompter::default();
+    let (res, out) = run_standalone_capture(Command::Whoami, &mut config, &mut p).await;
+    res.unwrap();
+    assert!(out.contains(&pk.to_bech32().unwrap()), "got: {out}");
+    assert!(out.contains(&pk.to_hex()), "got: {out}");
+    assert!(out.contains("relays: 1 configured"));
+}
+
+#[test]
+fn whoami_formatting_covers_unavailable_and_signer_labels() {
+    use std::path::Path;
+
+    use commands::whoami::{format_whoami, signer_label, IdentityStatus};
+
+    use crate::config::SignerConfig;
+
+    let s = format_whoami(
+        &IdentityStatus::Unavailable,
+        &signer_label(&SignerConfig::Nsd {
+            port: Some("/dev/ttyUSB0".into()),
+        }),
+        Path::new("/c/config.json"),
+        Path::new("/d/data"),
+        2,
+    );
+    assert!(s.contains("npub:   unavailable (device not connected)"));
+    assert!(s.contains("signer: nsd (port /dev/ttyUSB0)"));
+    assert!(s.contains("config: /c/config.json"));
+    assert!(s.contains("data:   /d/data"));
+    assert!(s.contains("relays: 2 configured"));
+
+    assert_eq!(
+        signer_label(&SignerConfig::Nsd { port: None }),
+        "nsd (port autodetect)"
+    );
+    assert_eq!(
+        signer_label(&SignerConfig::Software),
+        "software (OS keychain)"
+    );
 }
 
 // ------------------------------------------------------------- generate

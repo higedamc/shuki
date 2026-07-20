@@ -18,6 +18,10 @@ fn now_unix() -> u64 {
 
 pub(crate) async fn ls(ctx: &AppContext, ui: &mut Ui<'_>, path: Option<&str>) -> Result<()> {
     let paths = ctx.vault.list_paths().await?;
+    if paths.is_empty() && path.is_none() {
+        writeln!(ui.out, "vault is empty — try: shuki generate <path>")?;
+        return Ok(());
+    }
     let tree = VaultTree::build(&paths);
     let rendered = match path {
         None => tree.render_text(None),

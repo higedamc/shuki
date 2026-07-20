@@ -1,12 +1,13 @@
-//! Rendering: tree pane (left), detail/form/confirm pane (right), status bar.
+//! Rendering: header (identity), tree pane (left), detail/form/confirm pane
+//! (right), status bar, plus full-screen overlays (help, rename).
 //!
 //! Secrets: the detail pane renders the password as a fixed-length mask
 //! (never the real length) unless the user explicitly revealed it.
 
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use tui_tree_widget::Tree;
 
@@ -22,10 +23,16 @@ pub const PASSWORD_MASK: &str = "••••••••";
 
 /// Draw the whole app.
 pub fn draw(frame: &mut Frame, state: &mut AppState) {
-    let [main, status] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let [header, main, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(main);
+
+    draw_header(frame, header, state);
 
     let tree = Tree::new(&state.items)
         .expect("tree identifiers are unique full paths")
@@ -60,6 +67,77 @@ pub fn draw(frame: &mut Frame, state: &mut AppState) {
     }
 
     draw_status(frame, status, state);
+
+    // Full-screen overlays render on top of everything but the status bar.
+    match &state.mode {
+        Mode::Help(_) => draw_help_overlay(frame, main, state),
+        Mode::Rename(rename) => widgets::render_rename(frame, main, rename),
+        _ => {}
+    }
+}
+
+/// Header line: app name left, shortened npub + signer backend right.
+/// Visible in every mode.
+fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
+    frame.render_widget(
+        Paragraph::new("shuki").style(Style::default().add_modifier(Modifier::BOLD)),
+        area,
+    );
+    let id = format!(
+        "{} ({})",
+        shorten_npub(&state.identity.npub),
+        state.identity.signer_label
+    );
+    frame.render_widget(Paragraph::new(id).alignment(Alignment::Right), area);
+}
+
+/// Shorten a bech32 npub for the header: `npub1abcd…wxyz`. The full npub is
+/// shown in the help overlay. Bech32 is ASCII, so byte slicing is safe.
+fn shorten_npub(npub: &str) -> String {
+    if npub.len() > 15 && npub.is_ascii() {
+        format!("{}…{}", &npub[..10], &npub[npub.len() - 4..])
+    } else {
+        npub.to_owned()
+    }
+}
+
+/// Full-screen help overlay: all keybindings per mode + identity details.
+fn draw_help_overlay(frame: &mut Frame, area: Rect, state: &AppState) {
+    let lines = vec![
+        Line::raw("browse"),
+        Line::raw("  j/k ↑/↓  move        h/l ←/→  collapse / expand"),
+        Line::raw("  Enter    open entry  /        search"),
+        Line::raw("  y        copy        a        add entry"),
+        Line::raw("  e        edit entry  m        rename / move entry"),
+        Line::raw("  d        delete      s        sync"),
+        Line::raw("  ?        help        q        quit"),
+        Line::raw("detail"),
+        Line::raw("  r reveal/hide   y copy   m rename   ?  help   Esc back"),
+        Line::raw("search"),
+        Line::raw("  type to filter   Enter accept   Esc cancel"),
+        Line::raw("add / edit form"),
+        Line::raw("  Tab/Shift-Tab field   Ctrl-g generate password"),
+        Line::raw("  Enter save   Esc cancel"),
+        Line::raw("rename"),
+        Line::raw("  Enter rename   Esc cancel"),
+        Line::raw("confirm delete"),
+        Line::raw("  y delete   n/Esc cancel"),
+        Line::raw(""),
+        Line::raw(format!("identity: {}", state.identity.npub)),
+        Line::raw(format!("signer:   {}", state.identity.signer_label)),
+        Line::raw(format!("relays:   {} configured", state.relay_count)),
+        Line::raw(""),
+        Line::raw("press any key to close"),
+    ];
+    let height = (lines.len() as u16).saturating_add(2);
+    let rect = widgets::centered_rect(area, 80, height);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title("help")),
+        rect,
+    );
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -71,8 +149,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         Line::raw("y        copy password"),
         Line::raw("a        add entry"),
         Line::raw("e        edit entry"),
+        Line::raw("m        rename entry"),
         Line::raw("d        delete entry"),
         Line::raw("s        sync"),
+        Line::raw("?        help"),
         Line::raw("q        quit"),
     ];
     frame.render_widget(
@@ -126,6 +206,8 @@ fn draw_status(frame: &mut Frame, area: Rect, state: &AppState) {
             }
         }
         Mode::ConfirmDelete(_) => "[delete?]".to_owned(),
+        Mode::Rename(_) => "[rename]".to_owned(),
+        Mode::Help(_) => "[help]".to_owned(),
         Mode::Busy(label) => {
             let spin = SPINNER[state.spinner_frame % SPINNER.len()];
             format!("[busy] {spin} {label}…")
@@ -165,7 +247,7 @@ mod tests {
     }
 
     fn state_with(paths: &[&str]) -> AppState {
-        let mut state = AppState::new(true, 45);
+        let mut state = AppState::new(crate::tui::test_identity(), 2, true, 45);
         let paths: Vec<VaultPath> = paths.iter().map(|p| VaultPath::parse(p).unwrap()).collect();
         update(&mut state, AppMsg::TaskDone(TaskResult::Entries(Ok(paths))));
         state
@@ -244,5 +326,99 @@ mod tests {
         let text = render(&mut state);
         assert!(text.contains("syncing"));
         assert!(text.contains("hello"));
+    }
+
+    #[test]
+    fn header_shows_shortened_npub_in_every_mode() {
+        let mut state = state_with(&["web/x"]);
+        // Shortened form: first 10 chars + ellipsis + last 4.
+        let short = format!(
+            "{}…{}",
+            &crate::tui::TEST_NPUB[..10],
+            &crate::tui::TEST_NPUB[crate::tui::TEST_NPUB.len() - 4..]
+        );
+        for mode in [
+            Mode::Browse,
+            Mode::Detail { reveal: false },
+            Mode::Form(FormState::new_add()),
+            Mode::Busy("x".into()),
+            Mode::Error("boom".into()),
+        ] {
+            state.mode = mode;
+            let text = render(&mut state);
+            assert!(text.contains(&short), "npub missing in header:\n{text}");
+            assert!(text.contains("(software)"), "signer label missing:\n{text}");
+        }
+    }
+
+    #[test]
+    fn shorten_npub_keeps_short_strings() {
+        assert_eq!(shorten_npub("npub1short"), "npub1short");
+        let s = shorten_npub(crate::tui::TEST_NPUB);
+        assert!(s.starts_with("npub1"));
+        assert!(s.contains('…'));
+        assert!(s.len() < crate::tui::TEST_NPUB.len());
+    }
+
+    #[test]
+    fn help_overlay_lists_keys_and_full_identity() {
+        let mut state = state_with(&["web/x"]);
+        state.mode = Mode::Help(Box::new(Mode::Browse));
+        let text = render(&mut state);
+        for needle in [
+            "help",
+            "rename / move entry",
+            "Ctrl-g generate password",
+            "press any key to close",
+            crate::tui::TEST_NPUB, // full npub, not shortened
+            "signer:   software",
+            "relays:   2 configured",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn rename_overlay_renders_prefilled_path() {
+        let mut state = state_with(&["web/x"]);
+        state.mode = Mode::Rename(crate::tui::RenameState::new(
+            VaultPath::parse("web/x").unwrap(),
+        ));
+        let text = render(&mut state);
+        assert!(text.contains("rename web/x"), "title missing:\n{text}");
+        assert!(text.contains("new path: web/x"), "prefill missing:\n{text}");
+        assert!(text.contains("Enter: rename"), "hint missing:\n{text}");
+    }
+
+    #[test]
+    fn ctrl_g_generated_password_stays_masked_in_form() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+        let mut state = state_with(&[]);
+        let mut form = FormState::new_add();
+        form.focus = crate::tui::widgets::FormFocus::Password;
+        state.mode = Mode::Form(form);
+        update(
+            &mut state,
+            AppMsg::Key(KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('g'),
+                KeyModifiers::CONTROL,
+            )),
+        );
+        let generated = match &state.mode {
+            Mode::Form(form) => form.password.clone(),
+            other => panic!("expected form, got {other:?}"),
+        };
+        assert_eq!(generated.chars().count(), 24);
+        let text = render(&mut state);
+        assert!(
+            !text.contains(&*generated),
+            "generated password must stay masked:\n{text}"
+        );
+        assert!(text.contains("••••••"), "mask missing:\n{text}");
+        assert!(
+            text.contains("generated 24-char password"),
+            "status hint missing:\n{text}"
+        );
     }
 }

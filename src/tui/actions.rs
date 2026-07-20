@@ -33,6 +33,16 @@ pub enum Action {
     FormPrev,
     FormSubmit,
     FormCancel,
+    /// Ctrl-g in the form: fill the focused password field with a generated
+    /// password.
+    FormGeneratePassword,
+    OpenHelp,
+    CloseHelp,
+    StartRename,
+    RenameInput(char),
+    RenameBackspace,
+    RenameSubmit,
+    RenameCancel,
     DismissError,
     Back,
     Quit,
@@ -71,6 +81,8 @@ pub fn action_for(mode: &Mode, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('e') => Some(Action::StartEdit),
             KeyCode::Char('d') => Some(Action::StartDelete),
             KeyCode::Char('s') => Some(Action::StartSync),
+            KeyCode::Char('m') => Some(Action::StartRename),
+            KeyCode::Char('?') => Some(Action::OpenHelp),
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Esc => Some(Action::Back),
             _ => None,
@@ -84,17 +96,32 @@ pub fn action_for(mode: &Mode, key: KeyEvent) -> Option<Action> {
         Mode::Detail { .. } => match key.code {
             KeyCode::Char('r') => Some(Action::ToggleReveal),
             KeyCode::Char('y') => Some(Action::CopyPassword),
+            KeyCode::Char('m') => Some(Action::StartRename),
+            KeyCode::Char('?') => Some(Action::OpenHelp),
             KeyCode::Esc => Some(Action::Back),
             _ => None,
         },
-        Mode::Form(_) => match key.code {
-            KeyCode::Tab => Some(Action::FormNext),
-            KeyCode::BackTab => Some(Action::FormPrev),
-            KeyCode::Enter => Some(Action::FormSubmit),
-            KeyCode::Esc => Some(Action::FormCancel),
-            KeyCode::Backspace => Some(Action::FormBackspace),
-            _ => text_char(key).map(Action::FormInput),
+        Mode::Form(_) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('g') {
+                return Some(Action::FormGeneratePassword);
+            }
+            match key.code {
+                KeyCode::Tab => Some(Action::FormNext),
+                KeyCode::BackTab => Some(Action::FormPrev),
+                KeyCode::Enter => Some(Action::FormSubmit),
+                KeyCode::Esc => Some(Action::FormCancel),
+                KeyCode::Backspace => Some(Action::FormBackspace),
+                _ => text_char(key).map(Action::FormInput),
+            }
+        }
+        Mode::Rename(_) => match key.code {
+            KeyCode::Enter => Some(Action::RenameSubmit),
+            KeyCode::Esc => Some(Action::RenameCancel),
+            KeyCode::Backspace => Some(Action::RenameBackspace),
+            _ => text_char(key).map(Action::RenameInput),
         },
+        // Any key closes the help overlay (Ctrl-C already quit above).
+        Mode::Help(_) => Some(Action::CloseHelp),
         Mode::ConfirmDelete(_) => match key.code {
             KeyCode::Char('y') => Some(Action::ConfirmYes),
             KeyCode::Char('n') | KeyCode::Esc => Some(Action::ConfirmNo),
@@ -153,6 +180,8 @@ mod tests {
                 (key(KeyCode::Char('e')), Some(Action::StartEdit)),
                 (key(KeyCode::Char('d')), Some(Action::StartDelete)),
                 (key(KeyCode::Char('s')), Some(Action::StartSync)),
+                (key(KeyCode::Char('m')), Some(Action::StartRename)),
+                (key(KeyCode::Char('?')), Some(Action::OpenHelp)),
                 (key(KeyCode::Char('q')), Some(Action::Quit)),
                 (key(KeyCode::Esc), Some(Action::Back)),
                 (key(KeyCode::Char('x')), None),
@@ -190,6 +219,8 @@ mod tests {
                 &[
                     (key(KeyCode::Char('r')), Some(Action::ToggleReveal)),
                     (key(KeyCode::Char('y')), Some(Action::CopyPassword)),
+                    (key(KeyCode::Char('m')), Some(Action::StartRename)),
+                    (key(KeyCode::Char('?')), Some(Action::OpenHelp)),
                     (key(KeyCode::Esc), Some(Action::Back)),
                     (key(KeyCode::Char('j')), None),
                     (key(KeyCode::Enter), None),
@@ -212,10 +243,46 @@ mod tests {
                 (key(KeyCode::Char('a')), Some(Action::FormInput('a'))),
                 (key(KeyCode::Char('/')), Some(Action::FormInput('/'))),
                 (shift(KeyCode::Char('P')), Some(Action::FormInput('P'))),
+                (ctrl('g'), Some(Action::FormGeneratePassword)),
                 (ctrl('x'), None),
                 (key(KeyCode::Down), None),
             ],
         );
+    }
+
+    #[test]
+    fn rename_keymap() {
+        check(
+            &Mode::Rename(crate::tui::widgets::RenameState::new(
+                VaultPath::parse("a/b").unwrap(),
+            )),
+            &[
+                (key(KeyCode::Enter), Some(Action::RenameSubmit)),
+                (key(KeyCode::Esc), Some(Action::RenameCancel)),
+                (key(KeyCode::Backspace), Some(Action::RenameBackspace)),
+                (key(KeyCode::Char('x')), Some(Action::RenameInput('x'))),
+                (key(KeyCode::Char('/')), Some(Action::RenameInput('/'))),
+                (ctrl('x'), None),
+                (key(KeyCode::Tab), None),
+            ],
+        );
+    }
+
+    #[test]
+    fn help_keymap_any_key_closes() {
+        let mode = Mode::Help(Box::new(Mode::Browse));
+        for k in [
+            key(KeyCode::Esc),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('?')),
+            key(KeyCode::Char('q')),
+            key(KeyCode::Char('j')),
+            key(KeyCode::Tab),
+        ] {
+            assert_eq!(action_for(&mode, k), Some(Action::CloseHelp), "key {k:?}");
+        }
+        // Ctrl-C still quits from the help overlay.
+        assert_eq!(action_for(&mode, ctrl('c')), Some(Action::Quit));
     }
 
     #[test]
@@ -267,6 +334,10 @@ mod tests {
             Mode::Detail { reveal: false },
             Mode::Form(FormState::new_add()),
             Mode::ConfirmDelete(VaultPath::parse("a").unwrap()),
+            Mode::Rename(crate::tui::widgets::RenameState::new(
+                VaultPath::parse("a").unwrap(),
+            )),
+            Mode::Help(Box::new(Mode::Browse)),
             Mode::Busy("b".into()),
             Mode::Error("e".into()),
         ];

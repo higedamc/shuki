@@ -5,10 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 use zeroize::Zeroizing;
 
@@ -148,6 +148,11 @@ impl FormState {
         self.active_mut().pop();
     }
 
+    /// Replace the password field (the previous buffer is dropped zeroized).
+    pub fn set_password(&mut self, password: &str) {
+        self.password = Zeroizing::new(password.to_owned());
+    }
+
     /// Validate and build the [`Entry`] to save. `updated_at` is left at 0:
     /// the vault stamps it on `put`.
     pub fn build_entry(&self) -> std::result::Result<Entry, String> {
@@ -202,10 +207,67 @@ pub fn render_form(frame: &mut Frame, area: Rect, form: &FormState) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::raw(
-        "Tab/Shift-Tab: field   Enter: save   Esc: cancel",
+        "Tab/Shift-Tab: field   Ctrl-g: generate password   Enter: save   Esc: cancel",
     ));
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
+}
+
+/// State of the move/rename input overlay: `to` starts prefilled with the
+/// current path.
+#[derive(Debug)]
+pub struct RenameState {
+    /// Path being renamed (fixed).
+    pub from: VaultPath,
+    /// Editable target path.
+    pub to: String,
+}
+
+impl RenameState {
+    /// Overlay prefilled with the current path.
+    pub fn new(from: VaultPath) -> Self {
+        let to = from.to_string();
+        Self { from, to }
+    }
+
+    /// Append a typed character.
+    pub fn input(&mut self, c: char) {
+        if c.is_control() {
+            return;
+        }
+        self.to.push(c);
+    }
+
+    /// Remove the last character.
+    pub fn backspace(&mut self) {
+        self.to.pop();
+    }
+}
+
+/// Centered sub-rectangle: `percent_x` of the width, fixed `height` rows.
+pub fn centered_rect(area: Rect, percent_x: u16, height: u16) -> Rect {
+    let [h] = Layout::vertical([Constraint::Length(height.min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+    let [rect] = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .areas(h);
+    rect
+}
+
+/// Render the one-line rename/move overlay centered over `full`.
+pub fn render_rename(frame: &mut Frame, full: Rect, rename: &RenameState) {
+    let area = centered_rect(full, 70, 5);
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::raw(format!("new path: {}▏", rename.to)),
+        Line::raw(""),
+        Line::raw("Enter: rename   Esc: cancel"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(format!("rename {}", rename.from))),
         area,
     );
 }

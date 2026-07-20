@@ -4,6 +4,7 @@ pub(crate) mod entry_ops;
 pub(crate) mod init;
 pub(crate) mod key_cmd;
 pub(crate) mod sync_cmd;
+pub(crate) mod whoami;
 
 use crate::cli::Prompter;
 use crate::domain::SecretField;
