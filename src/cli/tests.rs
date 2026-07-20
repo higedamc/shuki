@@ -759,7 +759,6 @@ fn format_report_lists_errors_only_when_present() {
 // ------------------------------------------------------------- generate
 
 #[tokio::test]
-#[ignore = "needs crypto leaf"]
 async fn generate_no_clip_prints_password_and_stores() {
     let mut ctx = ctx_with(MockVault::default());
     let mut p = StubPrompter::default();

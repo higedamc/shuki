@@ -18,6 +18,7 @@ nostr = { version = "=0.44.0", features = ["nip06", "nip44", "nip49"] }
 nostr-sdk = { version = "=0.44.1", features = ["nip44", "nip49"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 serialport = "4"
+libc = "0.2"
 ratatui = "0.30"
 tui-tree-widget = "0.24"
 clap = { version = "4", features = ["derive"] }

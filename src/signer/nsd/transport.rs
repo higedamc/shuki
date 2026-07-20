@@ -102,6 +102,103 @@ impl SerialTransport for SerialPortTransport {
 }
 
 // ---------------------------------------------------------------------------
+// PTY fallback (test rigs without real hardware)
+// ---------------------------------------------------------------------------
+
+/// [`SerialTransport`] over a raw file handle in non-blocking mode.
+///
+/// Fallback for PTYs (e.g. a `socat` pair driving the `fake_nsd` example):
+/// the `serialport` crate's baud-rate ioctls fail with `ENOTTY` on pseudo
+/// terminals, but plain non-blocking file IO works fine there. Real devices
+/// keep using [`SerialPortTransport`].
+pub struct PtyFileTransport {
+    file: std::fs::File,
+    buf: Vec<u8>,
+}
+
+impl PtyFileTransport {
+    pub fn open(path: &str) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|e| ShukiError::Device(format!("open pty {path}: {e}")))?;
+        Ok(Self {
+            file,
+            buf: Vec::new(),
+        })
+    }
+
+    fn take_buffered_line(&mut self) -> Option<String> {
+        let pos = self.buf.iter().position(|&b| b == b'\n')?;
+        let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+}
+
+impl SerialTransport for PtyFileTransport {
+    fn write_line(&mut self, line: &str) -> Result<()> {
+        use std::io::Write;
+        let mut data = line.as_bytes().to_vec();
+        data.push(b'\n');
+        let mut written = 0;
+        while written < data.len() {
+            match self.file.write(&data[written..]) {
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(ShukiError::Device(format!("pty write: {e}"))),
+            }
+        }
+        Ok(())
+    }
+
+    fn read_line(&mut self, timeout: Duration) -> Result<Option<String>> {
+        use std::io::Read;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(line) = self.take_buffered_line() {
+                return Ok(Some(line));
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            let mut chunk = [0u8; 256];
+            match self.file.read(&mut chunk) {
+                Ok(0) => std::thread::sleep(Duration::from_millis(10)),
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => return Err(ShukiError::Device(format!("pty read: {e}"))),
+            }
+        }
+    }
+}
+
+/// Open `path` as a serial device, falling back to raw PTY file IO when the
+/// serialport crate cannot handle it (pseudo terminals).
+pub fn open_port(path: &str) -> Result<Box<dyn SerialTransport>> {
+    match SerialPortTransport::open(path) {
+        Ok(t) => Ok(Box::new(t)),
+        Err(serial_err) => match PtyFileTransport::open(path) {
+            Ok(t) => {
+                tracing::debug!(port = %path, "serialport open failed; using raw pty file IO");
+                Ok(Box::new(t))
+            }
+            Err(_) => Err(serial_err),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Autodetection
 // ---------------------------------------------------------------------------
 

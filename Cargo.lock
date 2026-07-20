@@ -4417,6 +4417,7 @@ dependencies = [
  "dirs",
  "hmac",
  "keyring",
+ "libc",
  "nostr",
  "nostr-sdk",
  "rand 0.8.7",

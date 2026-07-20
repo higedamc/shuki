@@ -22,7 +22,11 @@ use shuki::sync::payload::SyncPayload;
 use shuki::sync::SyncApi;
 use shuki::testutil::MockSigner;
 
-const RELAY_URL: &str = "ws://127.0.0.1:7000";
+/// Default relay URL; override with `SHUKI_TEST_RELAY` (note: macOS AirPlay
+/// occupies port 7000, so CI/dev on macOS should map another port).
+fn relay_url() -> String {
+    std::env::var("SHUKI_TEST_RELAY").unwrap_or_else(|_| "ws://127.0.0.1:7000".to_owned())
+}
 
 /// In-memory [`VaultStore`] for tests (ciphertext + sync state only).
 #[derive(Default)]
@@ -61,7 +65,7 @@ impl VaultStore for MemStore {
 fn test_config() -> Config {
     Config {
         signer: SignerConfig::Software,
-        relays: vec![RELAY_URL.to_owned()],
+        relays: vec![relay_url()],
         net: NetMode::Clearnet,
         ..Config::default()
     }

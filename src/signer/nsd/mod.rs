@@ -30,7 +30,7 @@ use crate::crypto::nip44_compat::conversation_key_from_shared_x;
 use crate::error::{Result, ShukiError};
 use crate::signer::{Signer, SignerKind};
 
-use transport::{SerialPortTransport, SerialTransport};
+use transport::SerialTransport;
 
 /// Connect-time `/ping` handshake budget (device answers instantly when
 /// unlocked and on the right port).
@@ -68,8 +68,8 @@ impl NsdSigner {
     pub async fn connect(port: Option<String>) -> Result<Self> {
         let (name, transport): (String, Box<dyn SerialTransport>) = match port {
             Some(p) => {
-                let t = SerialPortTransport::open(&p)?;
-                (p, Box::new(t))
+                let t = transport::open_port(&p)?;
+                (p, t)
             }
             None => {
                 let (n, t) = transport::autodetect(HANDSHAKE_TIMEOUT)?;
@@ -541,7 +541,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs crypto leaf (nip44_compat) merged"]
     async fn self_conversation_key_is_cached() {
         let keys = Keys::generate();
         let pk_hex = keys.public_key().to_hex();
@@ -560,7 +559,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs crypto leaf (nip44_compat) merged"]
     async fn nip44_self_roundtrip() {
         let keys = Keys::generate();
         let pk = keys.public_key();
