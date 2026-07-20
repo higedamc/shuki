@@ -198,6 +198,15 @@ update timing, stable per-entry d-tags. Recommendation: use a dedicated
 key for shuki (`shuki init` generates one) and Tor mode if network-level
 privacy matters.
 
+A relay cannot forge or tamper with your entries — event signatures are
+verified before shuki ever sees them, and NIP-44's authenticated encryption
+means content it didn't legitimately receive from you fails to decrypt. A
+single malicious or unreliable relay *can* censor (withhold) or replay
+stale versions of your own real events, which looks identical to "this
+relay is just behind." Configuring more than one independent relay
+mitigates this: sync reconciles across every configured relay and the
+newest version wins, so one bad relay can't win against honest ones.
+
 Local machine: plaintext exists only in process memory and is zeroized
 after use (`zeroize`); nothing unencrypted is ever written to disk; files
 are 0600 in 0700 dirs. The clipboard auto-clear writes an empty string

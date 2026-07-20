@@ -4,3 +4,10 @@
 .DS_Store
 .env
 .env.*
+
+# Defense-in-depth: shuki runtime artifacts should never live inside the
+# repo, but guard against a local SHUKI_DATA_DIR/SHUKI_CONFIG pointed here.
+*.nip44
+sync_state.json
+.device_session
+/config.json

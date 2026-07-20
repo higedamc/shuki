@@ -16,13 +16,10 @@ pub(crate) async fn export(ui: &mut Ui<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn import(ui: &mut Ui<'_>, value: Option<String>) -> Result<()> {
-    let raw = match value {
-        Some(v) => SecretField::new(v),
-        None => ui
-            .prompter
-            .prompt_secret("key (nsec1… / 64-hex / ncryptsec1…): ")?,
-    };
+pub(crate) async fn import(ui: &mut Ui<'_>) -> Result<()> {
+    let raw = ui
+        .prompter
+        .prompt_secret("key (nsec1… / 64-hex / ncryptsec1…): ")?;
     let v = raw.expose().trim();
     let pk = if v.starts_with("ncryptsec1") {
         let pw = ui.prompter.prompt_secret("passphrase: ")?;

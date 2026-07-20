@@ -3,6 +3,9 @@
 # ring 0.17.14 only and no `rsa` — verified with:
 #   cargo tree -i ring@0.16.20            → no match (default features)
 #   cargo tree --features tor -i ring@0.16.20 → via x509-signature ← tor-rtcompat
+# `cargo audit` also reports an "unmaintained" warning (not a vulnerability,
+# not blocked) for `paste` (RUSTSEC-2024-0436), pulled in the same way via
+# arti's `fs-mistrust` — same tor-only, absent-from-default-graph situation.
 # Revisit whenever nostr-sdk / arti versions are bumped.
 [advisories]
 ignore = [

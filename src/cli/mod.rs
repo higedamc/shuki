@@ -185,10 +185,11 @@ pub enum KeyCmd {
     /// Print the key as a NIP-49 ncryptsec (prompts for a passphrase)
     Export,
     /// Import an nsec / hex secret key / ncryptsec into the keychain
-    Import {
-        /// The key; prompted (never echoed) when omitted
-        value: Option<String>,
-    },
+    ///
+    /// Always prompted (never echoed) — passing key material as a CLI
+    /// argument would expose it via the process list (`ps`) and shell
+    /// history, so no argument form is offered.
+    Import,
 }
 
 /// Everything a vault-backed command needs. Built by `main.rs` (DI).
@@ -325,7 +326,7 @@ async fn dispatch_standalone_with(
         },
         Command::Key { cmd } => match cmd {
             KeyCmd::Export => commands::key_cmd::export(ui).await,
-            KeyCmd::Import { value } => commands::key_cmd::import(ui, value).await,
+            KeyCmd::Import => commands::key_cmd::import(ui).await,
         },
         Command::Whoami => commands::whoami::run(config, ui).await,
         Command::Lock => commands::lock::run(config, ui),
