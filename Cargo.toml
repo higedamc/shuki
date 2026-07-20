@@ -1,0 +1,44 @@
+[package]
+name = "shuki"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "pass-like tree-structured password manager with Nostr sync and hardware signer support"
+
+[features]
+default = []
+# Embedded Tor (arti) support. Off by default: heavy build. SOCKS5 proxy works without it.
+tor = ["nostr-sdk/tor"]
+# Integration tests that require a local Nostr relay (docker).
+relay-tests = []
+
+[dependencies]
+nostr = { version = "=0.44.0", features = ["nip06", "nip44", "nip49"] }
+nostr-sdk = { version = "=0.44.1", features = ["nip44", "nip49"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+serialport = "4"
+ratatui = "0.30"
+tui-tree-widget = "0.24"
+clap = { version = "4", features = ["derive"] }
+zeroize = { version = "1", features = ["derive"] }
+arboard = "3"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
