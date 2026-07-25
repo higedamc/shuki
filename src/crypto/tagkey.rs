@@ -4,8 +4,8 @@
 use hmac::{Hmac, Mac};
 use nostr::nips::nip44::v2::ConversationKey;
 use sha2::Sha256;
-use zeroize::Zeroizing;
 
+use crate::crypto::memlock::LockedBox;
 use crate::crypto::TagKey;
 use crate::domain::VaultPath;
 
@@ -20,7 +20,7 @@ pub fn derive_tag_key(conversation_key: &ConversationKey) -> TagKey {
         .expect("hmac accepts any key len");
     mac.update(TAG_KEY_INFO);
     let bytes: [u8; 32] = mac.finalize().into_bytes().into();
-    TagKey(Zeroizing::new(bytes))
+    TagKey(LockedBox::new(bytes))
 }
 
 /// Lowercase-hex HMAC-SHA256(tag_key, path) — the public d-tag for an entry.

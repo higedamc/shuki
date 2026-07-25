@@ -60,6 +60,9 @@ pub struct RemoteEntry {
 }
 
 /// Outcome of reconciling one d-tag.
+// PullRemote is fat (a whole RemoteEntry) but actions are few and
+// short-lived per sync round; boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum ReconcileAction {
     /// Remote version wins: write it to the local store.

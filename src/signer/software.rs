@@ -16,6 +16,7 @@ use nostr::{Event, FromBech32, Keys, PublicKey, SecretKey, UnsignedEvent};
 use tokio::sync::OnceCell;
 use zeroize::Zeroizing;
 
+use crate::crypto::memlock::LockedBox;
 use crate::error::{Result, ShukiError};
 use crate::signer::{Signer, SignerKind};
 
@@ -109,8 +110,9 @@ pub struct SoftwareSigner {
     /// Cached NIP-44 self conversation key (see [`Signer::self_conversation_key`]).
     /// It stays in process memory for the signer's lifetime by design: it is
     /// the working key for bulk vault encrypt/decrypt, and the contract
-    /// requires asking the backend only once.
-    self_ck: OnceCell<ConversationKey>,
+    /// requires asking the backend only once. Held on page-locked memory so
+    /// it cannot be swapped out (best effort).
+    self_ck: OnceCell<LockedBox<ConversationKey>>,
 }
 
 impl SoftwareSigner {
@@ -191,9 +193,10 @@ impl Signer for SoftwareSigner {
                 })
                 .await
                 .map_err(join_err)?
+                .map(LockedBox::new)
             })
             .await?;
-        Ok(*ck)
+        Ok(**ck)
     }
 
     async fn nip44_encrypt(&self, peer: &PublicKey, plaintext: &[u8]) -> Result<String> {

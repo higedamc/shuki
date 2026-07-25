@@ -209,7 +209,15 @@ newest version wins, so one bad relay can't win against honest ones.
 
 Local machine: plaintext exists only in process memory and is zeroized
 after use (`zeroize`); nothing unencrypted is ever written to disk; files
-are 0600 in 0700 dirs. The clipboard auto-clear writes an empty string
+are 0600 in 0700 dirs. Live secrets are additionally locked into RAM
+(`mlock` / `VirtualLock`) so they cannot be swapped out: long-lived keys
+(conversation key, tag key) sit on dedicated guard-paged allocations, and
+decrypted field values pin their buffers best-effort. Locking failures
+(`RLIMIT_MEMLOCK`, containers, Qubes) degrade gracefully — shuki keeps
+working with zeroize-only memory and warns once. Known limits: transient
+copies made inside the `nostr` crate or while keys move between buffers
+are not locked, and hibernation (suspend-to-disk) writes even locked
+pages to disk — use encrypted swap if that is in your threat model. The clipboard auto-clear writes an empty string
 after the TTL and never clobbers newer copies, but clipboard-manager
 history is out of shuki's control (`arboard` has no concealed-pasteboard
 support).
