@@ -1,4 +1,7 @@
-#![forbid(unsafe_code)]
+// Deny (not forbid) so exactly one module can opt back in: memory locking
+// (`crypto::memlock`) is impossible without FFI into mlock/VirtualLock. All
+// unsafe code lives there; everything else stays lint-enforced safe.
+#![deny(unsafe_code)]
 //! shuki — pass-like tree-structured password manager with Nostr sync.
 //!
 //! Architecture: CLI/TUI → [`vault::Vault`] → [`signer::Signer`] + [`store::VaultStore`],

@@ -9,26 +9,41 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
 
 use super::path::VaultPath;
+use crate::crypto::memlock::LockedString;
 
 /// A secret string (password, notes, custom field values).
-#[derive(Clone, Default, ZeroizeOnDrop)]
-pub struct SecretField(String);
+///
+/// The backing buffer is page-locked at construction (best effort, see
+/// [`crate::crypto::memlock`]) so live secrets stay out of swap, and
+/// zeroized on drop.
+pub struct SecretField(LockedString);
 
 impl SecretField {
     pub fn new(s: String) -> Self {
-        Self(s)
+        Self(LockedString::new(s))
     }
 
     /// Access the plaintext. Keep the borrow short-lived; never log it.
     pub fn expose(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.as_str().is_empty()
+    }
+}
+
+impl Default for SecretField {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
+
+impl Clone for SecretField {
+    fn clone(&self) -> Self {
+        Self::new(self.0.as_str().to_owned())
     }
 }
 
@@ -41,7 +56,7 @@ impl std::fmt::Debug for SecretField {
 impl PartialEq for SecretField {
     /// Constant-time comparison (length may still leak; contents do not).
     fn eq(&self, other: &Self) -> bool {
-        let (a, b) = (self.0.as_bytes(), other.0.as_bytes());
+        let (a, b) = (self.0.as_str().as_bytes(), other.0.as_str().as_bytes());
         if a.len() != b.len() {
             return false;
         }
@@ -52,19 +67,19 @@ impl Eq for SecretField {}
 
 impl From<&str> for SecretField {
     fn from(s: &str) -> Self {
-        Self(s.to_owned())
+        Self::new(s.to_owned())
     }
 }
 
 impl Serialize for SecretField {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
+        s.serialize_str(self.0.as_str())
     }
 }
 
 impl<'de> Deserialize<'de> for SecretField {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Ok(Self(String::deserialize(d)?))
+        Ok(Self::new(String::deserialize(d)?))
     }
 }
 

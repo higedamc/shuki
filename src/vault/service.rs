@@ -58,6 +58,7 @@ use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
 use super::Vault;
+use crate::crypto::memlock::LockedBox;
 use crate::crypto::tagkey::{d_tag, derive_tag_key};
 use crate::crypto::TagKey;
 use crate::domain::{Entry, VaultPath};
@@ -68,8 +69,10 @@ use crate::sync::payload::SyncPayload;
 
 /// Decrypted in-memory view, built once per `open()`.
 struct OpenState {
-    /// Self conversation key (cached; devices are asked once).
-    conversation_key: ConversationKey,
+    /// Self conversation key (cached; devices are asked once). Kept on
+    /// page-locked memory and shared as an `Arc` so operations reference it
+    /// across store IO instead of copying the key out of the locked pages.
+    conversation_key: Arc<LockedBox<ConversationKey>>,
     /// HMAC key for path → d-tag derivation.
     tag_key: TagKey,
     /// Live entries: path → d-tag of the ciphertext file that holds it.
@@ -124,6 +127,9 @@ impl VaultService {
                 )),
                 other => other,
             })?;
+        // Move the key onto its own locked pages immediately; everything
+        // below works through references into that allocation.
+        let ck = LockedBox::new(ck);
         let tag_key = derive_tag_key(&ck);
         let entries = store_blocking(&self.store, |s| s.list()).await?;
 
@@ -181,7 +187,7 @@ impl VaultService {
             }
         }
         Ok(OpenState {
-            conversation_key: ck,
+            conversation_key: Arc::new(ck),
             tag_key,
             index,
             tombstones,
@@ -223,7 +229,7 @@ impl VaultService {
     /// Fetch + decrypt + decode the live payload stored under `d_tag`.
     async fn read_payload(
         &self,
-        ck: ConversationKey,
+        ck: Arc<LockedBox<ConversationKey>>,
         d_tag: String,
     ) -> Result<Option<SyncPayload>> {
         let ce = store_blocking(&self.store, move |s| s.get(&d_tag)).await?;
@@ -259,7 +265,7 @@ impl Vault for VaultService {
             .get(path)
             .cloned()
             .ok_or_else(|| ShukiError::NotFound(path.as_str().to_owned()))?;
-        let ck = st.conversation_key;
+        let ck = Arc::clone(&st.conversation_key);
         drop(guard);
         let payload = self
             .read_payload(ck, dt)
@@ -280,7 +286,7 @@ impl Vault for VaultService {
         let mut entry = entry;
         entry.updated_at = Self::stamp(st);
         let dt = d_tag(&st.tag_key, &entry.path);
-        let ck = st.conversation_key;
+        let ck = Arc::clone(&st.conversation_key);
         let payload = SyncPayload::from_entry(&entry);
         self.write_encrypted(&ck, dt.clone(), &payload).await?;
         let st = state_mut(&mut guard)?;
@@ -299,7 +305,7 @@ impl Vault for VaultService {
             .cloned()
             .ok_or_else(|| ShukiError::NotFound(path.as_str().to_owned()))?;
         let ts = Self::stamp(st);
-        let ck = st.conversation_key;
+        let ck = Arc::clone(&st.conversation_key);
         let tomb = SyncPayload::tombstone(path.clone(), ts);
         // Replaces the live ciphertext under the SAME d-tag; the tombstone
         // stays in the store so the sync engine pushes the deletion and the
@@ -323,9 +329,9 @@ impl Vault for VaultService {
             .get(from)
             .cloned()
             .ok_or_else(|| ShukiError::NotFound(from.as_str().to_owned()))?;
-        let ck = st.conversation_key;
+        let ck = Arc::clone(&st.conversation_key);
         let old = self
-            .read_payload(ck, from_dt.clone())
+            .read_payload(Arc::clone(&ck), from_dt.clone())
             .await?
             .filter(|p| !p.deleted)
             .ok_or_else(|| ShukiError::NotFound(from.as_str().to_owned()))?;

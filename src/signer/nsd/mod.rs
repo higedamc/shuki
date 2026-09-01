@@ -26,6 +26,7 @@ use nostr::{Event, Kind, PublicKey, Timestamp, UnsignedEvent};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use zeroize::Zeroizing;
 
+use crate::crypto::memlock::LockedBox;
 use crate::crypto::nip44_compat::conversation_key_from_shared_x;
 use crate::error::{Result, ShukiError};
 use crate::signer::{Signer, SignerKind};
@@ -56,7 +57,8 @@ struct WireRequest {
 pub struct NsdSigner {
     tx: mpsc::UnboundedSender<WireRequest>,
     device_pubkey: OnceCell<PublicKey>,
-    self_conv_key: OnceCell<ConversationKey>,
+    /// Cached self conversation key, on page-locked memory (best effort).
+    self_conv_key: OnceCell<LockedBox<ConversationKey>>,
 }
 
 impl NsdSigner {
@@ -284,10 +286,10 @@ impl Signer for NsdSigner {
             .get_or_try_init(|| async {
                 let pk = self.device_public_key().await?;
                 let x = self.shared_secret_x(&pk).await?;
-                Ok::<_, ShukiError>(conversation_key_from_shared_x(&x))
+                Ok::<_, ShukiError>(LockedBox::new(conversation_key_from_shared_x(&x)))
             })
             .await?;
-        Ok(*ck)
+        Ok(**ck)
     }
 
     async fn nip44_encrypt(&self, peer: &PublicKey, plaintext: &[u8]) -> Result<String> {
